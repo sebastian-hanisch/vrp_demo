@@ -1,0 +1,10 @@
+# Lokal generierte Feedback-Logs nicht versionieren
+feedback_log.csv
+test_feedback_log.csv
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+venv/
+.venv/
