@@ -42,6 +42,35 @@ Bewertungs-/Visualisierungsfunktionen ergänzt, `log_feedback`/
 Parameter statt globaler Konstante – einfacher testbar), volle Testsuite
 (70 Tests) vor und nach dem Umbau grün.
 
+## Zwei Ebenen: Ergebnis zuerst, Technik auf Wunsch
+
+Die App zeigt direkt nach der Stopp-Tabelle die **Primäransicht "Ihre optimierte
+Route"**: die beste der vier eigenen Methoden für das aktuelle Szenario, mit
+Fahrzeit/Kosten/CO₂-Ersparnis gegenüber einer **unoptimierten Ausgangslage** (Stopps in
+Eingabereihenfolge, ohne jede Optimierung) prominent im Vordergrund - kein
+Algorithmus-Name in der Überschrift, nur das Ergebnis. Welche Methode konkret gewonnen
+hat, steht als kleine, zurückhaltende Caption darunter (Transparenz ohne die
+eigentliche Botschaft zu verwässern).
+
+Der komplette Methodenvergleich (alle vier Heuristiken einzeln, OR-Tools,
+Benchmark-Details) liegt danach eingeklappt im Expander "🔧 Wie wir das erreichen" -
+weiterhin vollständig vorhanden, aber nicht mehr das Erste, was ein Besucher sieht.
+
+**Hintergrund:** Der ursprüngliche Zweck der Demo ist, Geschäftsentscheidern zu zeigen,
+dass Optimierung echte Kostenersparnis bringt - nicht, jede implementierte Methode
+gleichrangig zur Schau zu stellen. Mit fünf gleichberechtigten Haupttabs (Sweep,
+Savings, Beam Search, GA, OR-Tools) plus Vergleichstab musste ein Besucher vorher erst
+verstehen, dass es mehrere Methoden gibt, bevor die eigentliche Botschaft ankam. Die
+Umstrukturierung ändert nichts an der vorhandenen Substanz (kein Code wurde entfernt),
+nur an der Präsentationsreihenfolge.
+
+**OR-Tools bewusst nicht Teil der Primäransicht:** OR-Tools ist Button-gesteuert (siehe
+Ressourcenschutz unten) und nicht garantiert bereits gelöst, wenn die Seite lädt. Die
+Primäransicht bezieht sich deshalb ausschließlich auf die vier eigenen, immer sofort
+verfügbaren Methoden - ein Besucher sieht so ohne jede Zusatz-Interaktion ein
+vollständiges Ergebnis. Der Vergleich mit OR-Tools bleibt im technischen Detailbereich
+verfügbar, sobald gelöst.
+
 ## Funktionsumfang
 
 - **Straßennetz statt Luftlinie:** Depot, Stopps und zusätzliche "Kreuzungen" bilden
@@ -257,6 +286,20 @@ beide Richtungen getrennt berechnet und als eigener Kandidat in die
 Fusionsreihenfolge einsortiert (`test_savings_respects_asymmetric_direction`); bei
 symmetrischen Distanzen (`s_ij == s_ji`) bleibt das Verhalten unverändert
 (`test_savings_symmetric_case_unchanged_by_directional_fix`).
+
+## Ein Bug, zuerst in der Packungsoptimierung-Demo gefunden
+
+Beim Bauen der zweiten Demo (3D-Packungsoptimierung) fiel ein identisches Muster auf,
+das dort zuerst behoben wurde - dieselbe Ursache steckte auch hier: Der
+Regenerierungs-Trigger für die Stopps prüfte nur `n_stops`, nicht den Seed. Ein reiner
+Seed-Wechsel (ohne gleichzeitige Änderung der Stopp-Anzahl) hatte dadurch **keine
+Wirkung** auf die tatsächlich generierten Stopps, obwohl die Sidebar bereits den neuen
+Seed anzeigte - der Regler suggerierte eine Wirkung, die er nicht hatte. Reproduziert
+und bestätigt: Stopp-Koordinaten blieben nach `at.sidebar.number_input[0].set_value(999)`
+identisch. Fix: Cache-Schlüssel um den Seed erweitert (`gen_key = (n_stops, seed)` statt
+nur `n_stops`). Regressionstests: `test_seed_change_alone_regenerates_stops`,
+`test_n_stops_change_still_regenerates_stops` (stellt sicher, dass der bestehende
+Trigger durch die Erweiterung nicht kaputt geht).
 
 ## Ein Experiment, das wieder verworfen wurde
 

@@ -52,6 +52,7 @@ from vrp_constants import (
 )
 from vrp_construction import (
     beam_search_construction,
+    decode_giant_tour,
     genetic_algorithm_construction,
     savings_construction,
     sweep_construction,
@@ -163,9 +164,17 @@ sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled,
 if "force_regen" not in st.session_state:
     st.session_state.force_regen = False
 
+# Beide Stopp-Generierungs-relevanten Parameter erfassen, nicht nur n_stops.
+# (Bug gefunden und behoben - identisches Muster wie in der Packungsoptimierung-
+# Demo: vorher wurde nur n_stops geprüft, wodurch ein reiner Seed-Wechsel die
+# Stopps NICHT neu erzeugt hat, obwohl die Sidebar bereits den neuen Seed
+# anzeigte. n_vehicles, capacity, tw_enabled, asym_enabled etc. beeinflussen
+# die Stopp-GENERIERUNG selbst nicht - nur n_stops und seed tun das, siehe
+# den RNG-Aufruf direkt unten.)
+gen_key = (n_stops, int(seed))
 needs_init = (
     "stops" not in st.session_state or regenerate or st.session_state.force_regen
-    or st.session_state.get("n_stops_cache") != n_stops
+    or st.session_state.get("gen_key_cache") != gen_key
 )
 if needs_init:
     rng = np.random.default_rng(int(seed))
@@ -186,7 +195,7 @@ if needs_init:
             "servicezeit": service0,
         }
     )
-    st.session_state.n_stops_cache = n_stops
+    st.session_state.gen_key_cache = gen_key
     st.session_state.force_regen = False
 
 st.subheader("📍 Lieferstopps (direkt editierbar)")
@@ -258,256 +267,341 @@ METHODS = [
     ("ga", "Genetischer Algorithmus", "🧬 GA", f"Kreuzt und mutiert eine Population von {GA_POP_SIZE} Routenfolgen über {GA_GENERATIONS} Generationen (genetischer Algorithmus).", ga_routes, ga_infeasible),
 ]
 
-tab_labels = [m[2] for m in METHODS] + ["🧮 OR-Tools", "📊 Vergleich"]
-tabs = st.tabs(tab_labels)
+# Historien einmal zentral berechnen - werden sowohl für die Primäransicht
+# ("Ihre optimierte Route") als auch für die Detail-Tabs weiter unten
+# gebraucht, nicht doppelt rechnen.
+histories = {
+    key: local_search_history(routes, D, demands, capacity, earliest, latest, service, tw_enabled)
+    for key, _label, _tab_label, _caption, routes, _infeasible in METHODS
+}
 
-summaries = {}
-for (key, label, _tab_label, caption, routes, infeasible), tab in zip(METHODS, tabs[: len(METHODS)]):
-    with tab:
-        st.caption(caption)
-        history = local_search_history(routes, D, demands, capacity, earliest, latest, service, tw_enabled)
-        summaries[key] = render_heuristic_panel(
-            key, label, history, infeasible, depot, coords, ids, demands, D, paths_lookup,
-            node_positions, r_edges_xy, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km,
+# Naive Ausgangslage OHNE jede Optimierung: Stopps werden in Eingabereihenfolge
+# einfach nacheinander in Fahrzeuge gefüllt (kapazitätskonform), keine
+# distanzbewusste Konstruktion, keine lokale Suche. Repräsentiert "was man
+# ohne Tourenoptimierung tun würde" - Kontrastfolie für die Primäransicht.
+naive_routes, naive_infeasible = decode_giant_tour(list(range(n_stops_eff)), demands, capacity, n_vehicles)
+naive_dist, naive_viol = solution_totals(naive_routes, D, earliest, latest, service, tw_enabled)
+
+# Beste der vier eigenen Methoden bestimmen (OR-Tools bewusst außen vor - ist
+# Button-gesteuert und nicht garantiert bereits gelöst; die Primäransicht
+# soll ohne Zusatz-Interaktion immer ein vollständiges Ergebnis zeigen).
+own_candidates = []
+for key, label, _tab_label, _caption, _routes, infeasible in METHODS:
+    final_routes, final_dist, final_viol = histories[key][-1]
+    own_candidates.append({
+        "key": key, "label": label, "routes": final_routes,
+        "dist": final_dist, "viol": final_viol, "infeasible": infeasible,
+    })
+if tw_enabled:
+    best_own = min(own_candidates, key=lambda c: (c["viol"], c["dist"]))
+else:
+    best_own = min(own_candidates, key=lambda c: c["dist"])
+
+st.markdown("## 🎯 Ihre optimierte Route")
+
+naive_hours, naive_cost, naive_co2 = distance_to_business(naive_dist, speed_kmh, cost_per_km, co2_per_km)
+best_hours, best_cost, best_co2 = distance_to_business(best_own["dist"], speed_kmh, cost_per_km, co2_per_km)
+cost_saved = naive_cost - best_cost
+hours_saved = naive_hours - best_hours
+co2_saved = naive_co2 - best_co2
+violations_not_worse = not tw_enabled or best_own["viol"] <= naive_viol
+
+if best_own["infeasible"]:
+    st.warning(
+        "⚠️ Mindestens ein Fahrzeug wird bei dieser Konfiguration kapazitätsmäßig überladen - "
+        "Fahrzeuge oder Kapazität erhöhen für eine zulässige Lösung."
+    )
+
+m1, m2, m3, m4 = st.columns(4)
+m1.metric("Distanz", f"{best_own['dist']:.1f} km")
+m2.metric("Fahrzeit", f"{best_hours:.1f} h", delta=f"-{hours_saved:.1f} h ggü. unoptimiert")
+m3.metric("Kraftstoffkosten", f"{best_cost:.0f} €", delta=f"-{cost_saved:.0f} € ggü. unoptimiert")
+m4.metric("CO₂", f"{best_co2:.0f} kg", delta=f"-{co2_saved:.0f} kg ggü. unoptimiert")
+
+if tw_enabled:
+    st.caption(f"Zeitfenster-Verletzungen: {best_own['viol']} (unoptimiert: {naive_viol})")
+
+if cost_saved > 0.5 and violations_not_worse:
+    st.success(
+        f"💶 Gegenüber einer unoptimierten Abarbeitung Ihrer Stopps in Eingabereihenfolge sparen Sie "
+        f"hier ca. **{cost_saved:.0f} € Kraftstoffkosten**, **{hours_saved:.1f} Stunden Fahrzeit** und "
+        f"**{co2_saved:.0f} kg CO₂** – bei einer einzelnen Tourenplanung. Hochgerechnet auf regelmäßige "
+        f"Touren summiert sich das schnell."
+    )
+
+fig_best = build_figure(
+    depot, coords, ids, best_own["routes"], paths_lookup, node_positions, r_edges_xy,
+    D, earliest, latest, service, tw_enabled,
+)
+st.plotly_chart(fig_best, use_container_width=True, key="primary_best_plot")
+
+pdf_bytes_best = generate_tour_plan_pdf(
+    "Optimierte Route", best_own["routes"], ids, demands, D, earliest, latest, service,
+    tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km,
+)
+st.download_button(
+    "📄 Tourenplan als PDF herunterladen", data=pdf_bytes_best,
+    file_name="tourenplan_optimiert.pdf", mime="application/pdf", key="primary_pdf_download",
+)
+
+st.caption(
+    "Ermittelt mit der besten von vier eigenen Optimierungsmethoden für dieses Szenario. "
+    "Details zu allen Methoden und dem Vergleich mit Google OR-Tools unten."
+)
+
+st.markdown("---")
+
+with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleich", expanded=False):
+    tab_labels = [m[2] for m in METHODS] + ["🧮 OR-Tools", "📊 Vergleich"]
+    tabs = st.tabs(tab_labels)
+
+    summaries = {}
+    for (key, label, _tab_label, caption, routes, infeasible), tab in zip(METHODS, tabs[: len(METHODS)]):
+        with tab:
+            st.caption(caption)
+            history = histories[key]  # bereits oben zentral berechnet
+            summaries[key] = render_heuristic_panel(
+                key, label, history, infeasible, depot, coords, ids, demands, D, paths_lookup,
+                node_positions, r_edges_xy, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km,
+            )
+
+    tab_ortools = tabs[len(METHODS)]
+    tab_compare = tabs[len(METHODS) + 1]
+
+    ortools_summary = None
+    with tab_ortools:
+        st.caption(
+            "Löst dasselbe Problem (gleiche Straßennetz-Distanzen, gleiche Nebenbedingungen) mit "
+            "Googles Open-Source-Solver OR-Tools (Apache 2.0) statt mit unseren eigenen Heuristiken. "
+            "OR-Tools nutzt intern eine Guided-Local-Search-Metaheuristik und läuft bis zu einem Zeitlimit."
+        )
+        time_limit = st.slider(
+            "Zeitlimit für den Solver (Sekunden)", 1, ORTOOLS_MAX_TIME_LIMIT, min(3, ORTOOLS_MAX_TIME_LIMIT), key="ortools_time_limit",
+            help=f"Auf {ORTOOLS_MAX_TIME_LIMIT}s gedeckelt, um die App bei mehreren gleichzeitigen Besuchern auf dem kostenlosen Hosting-Tarif nicht zu überlasten.",
+        )
+        current_key = (
+            tuple(coords.round(2).flatten()), tuple(depot), n_vehicles, capacity, tw_enabled,
+            n_stops_eff, int(seed), n_extra, time_limit, tuple(demands.round(1)),
+            tuple(earliest.round(1)) if tw_enabled else None,
+            tuple(latest.round(1)) if tw_enabled else None,
+            tuple(service.round(1)) if tw_enabled else None,
         )
 
-tab_ortools = tabs[len(METHODS)]
-tab_compare = tabs[len(METHODS) + 1]
+        if "ortools_last_solve_time" not in st.session_state:
+            st.session_state.ortools_last_solve_time = 0.0
+        if "ortools_last_time_limit" not in st.session_state:
+            st.session_state.ortools_last_time_limit = 0
 
-ortools_summary = None
-with tab_ortools:
-    st.caption(
-        "Löst dasselbe Problem (gleiche Straßennetz-Distanzen, gleiche Nebenbedingungen) mit "
-        "Googles Open-Source-Solver OR-Tools (Apache 2.0) statt mit unseren eigenen Heuristiken. "
-        "OR-Tools nutzt intern eine Guided-Local-Search-Metaheuristik und läuft bis zu einem Zeitlimit."
-    )
-    time_limit = st.slider(
-        "Zeitlimit für den Solver (Sekunden)", 1, ORTOOLS_MAX_TIME_LIMIT, min(3, ORTOOLS_MAX_TIME_LIMIT), key="ortools_time_limit",
-        help=f"Auf {ORTOOLS_MAX_TIME_LIMIT}s gedeckelt, um die App bei mehreren gleichzeitigen Besuchern auf dem kostenlosen Hosting-Tarif nicht zu überlasten.",
-    )
-    current_key = (
-        tuple(coords.round(2).flatten()), tuple(depot), n_vehicles, capacity, tw_enabled,
-        n_stops_eff, int(seed), n_extra, time_limit, tuple(demands.round(1)),
-        tuple(earliest.round(1)) if tw_enabled else None,
-        tuple(latest.round(1)) if tw_enabled else None,
-        tuple(service.round(1)) if tw_enabled else None,
-    )
-
-    if "ortools_last_solve_time" not in st.session_state:
-        st.session_state.ortools_last_solve_time = 0.0
-    if "ortools_last_time_limit" not in st.session_state:
-        st.session_state.ortools_last_time_limit = 0
-
-    solve_clicked = st.button("🧮 Mit OR-Tools lösen", key="ortools_solve_btn")
-    if solve_clicked:
-        # Cooldown bezieht sich auf das Zeitlimit des TATSÄCHLICH gelaufenen
-        # letzten Solves, nicht auf das aktuell eingestellte - sonst ließe sich
-        # die Sperre umgehen, indem man nach einem langen Lauf einfach das
-        # Zeitlimit herunterregelt und sofort erneut klickt.
-        cooldown = st.session_state.ortools_last_time_limit + ORTOOLS_COOLDOWN_BUFFER
-        since_last = time.time() - st.session_state.ortools_last_solve_time
-        if since_last < cooldown:
-            st.warning(
-                f"⏳ Bitte noch {cooldown - since_last:.0f}s warten, bevor Sie erneut lösen "
-                f"(Schutz vor Überlastung bei mehreren gleichzeitigen Besuchern)."
-            )
-        else:
-            with st.spinner(f"OR-Tools sucht bis zu {time_limit}s nach einer Lösung..."):
-                t_start = time.time()
-                or_routes = solve_with_ortools(
-                    n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, time_limit
+        solve_clicked = st.button("🧮 Mit OR-Tools lösen", key="ortools_solve_btn")
+        if solve_clicked:
+            # Cooldown bezieht sich auf das Zeitlimit des TATSÄCHLICH gelaufenen
+            # letzten Solves, nicht auf das aktuell eingestellte - sonst ließe sich
+            # die Sperre umgehen, indem man nach einem langen Lauf einfach das
+            # Zeitlimit herunterregelt und sofort erneut klickt.
+            cooldown = st.session_state.ortools_last_time_limit + ORTOOLS_COOLDOWN_BUFFER
+            since_last = time.time() - st.session_state.ortools_last_solve_time
+            if since_last < cooldown:
+                st.warning(
+                    f"⏳ Bitte noch {cooldown - since_last:.0f}s warten, bevor Sie erneut lösen "
+                    f"(Schutz vor Überlastung bei mehreren gleichzeitigen Besuchern)."
                 )
-                elapsed = time.time() - t_start
-            # Zeitstempel NACH dem Solve setzen: sonst läuft die Sperrfrist
-            # bereits während der (bis zu 5s dauernden) Rechnung ab und die
-            # effektive Pause nach Solve-Ende wäre deutlich kürzer als gedacht.
-            st.session_state.ortools_last_solve_time = time.time()
-            st.session_state.ortools_last_time_limit = time_limit
-            st.session_state["ortools_result"] = {"routes": or_routes, "key": current_key, "elapsed": elapsed}
+            else:
+                with st.spinner(f"OR-Tools sucht bis zu {time_limit}s nach einer Lösung..."):
+                    t_start = time.time()
+                    or_routes = solve_with_ortools(
+                        n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, time_limit
+                    )
+                    elapsed = time.time() - t_start
+                # Zeitstempel NACH dem Solve setzen: sonst läuft die Sperrfrist
+                # bereits während der (bis zu 5s dauernden) Rechnung ab und die
+                # effektive Pause nach Solve-Ende wäre deutlich kürzer als gedacht.
+                st.session_state.ortools_last_solve_time = time.time()
+                st.session_state.ortools_last_time_limit = time_limit
+                st.session_state["ortools_result"] = {"routes": or_routes, "key": current_key, "elapsed": elapsed}
 
-    result = st.session_state.get("ortools_result")
-    if result is None:
-        st.info("Noch keine Lösung berechnet – auf den Button oben klicken.")
-    elif result["routes"] is None:
-        st.error(
-            "⚠️ OR-Tools hat keine zulässige Lösung gefunden (z. B. reicht die Kapazität "
-            "strukturell nicht aus). Fahrzeuge/Kapazität erhöhen und erneut versuchen."
-        )
-    else:
-        if result["key"] != current_key:
-            st.warning(
-                "⚠️ Die Eingaben haben sich seit dieser Lösung geändert – das alte Ergebnis "
-                "passt nicht mehr zu den aktuellen Stopps und wird ausgeblendet. Bitte erneut lösen."
+        result = st.session_state.get("ortools_result")
+        if result is None:
+            st.info("Noch keine Lösung berechnet – auf den Button oben klicken.")
+        elif result["routes"] is None:
+            st.error(
+                "⚠️ OR-Tools hat keine zulässige Lösung gefunden (z. B. reicht die Kapazität "
+                "strukturell nicht aus). Fahrzeuge/Kapazität erhöhen und erneut versuchen."
             )
         else:
-            or_routes = result["routes"]
-            or_dist, or_viol = solution_totals(or_routes, D, earliest, latest, service, tw_enabled)
-
-            hours, cost, co2 = distance_to_business(or_dist, speed_kmh, cost_per_km, co2_per_km)
-            m1, m2, m3, m4, m5 = st.columns(5)
-            m1.metric("Gesamtdistanz", f"{or_dist:.1f} km")
-            m2.metric("Fahrzeit (geschätzt)", f"{hours:.1f} h")
-            m3.metric("Kraftstoffkosten (geschätzt)", f"{cost:.0f} €")
-            m4.metric("CO₂ (geschätzt)", f"{co2:.0f} kg")
-            m5.metric("Rechenzeit", f"{result['elapsed']:.1f} s")
-            if tw_enabled:
-                st.metric("Zeitfenster-Verletzungen", or_viol)
-
-            animate_or = st.checkbox("🚚 Route animiert abspielen", key="ortools_animate")
-            pdf_bytes_or = generate_tour_plan_pdf("OR-Tools", or_routes, ids, demands, D, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km)
-            st.download_button(
-                "📄 Tourenplan als PDF herunterladen", data=pdf_bytes_or,
-                file_name="tourenplan_ortools.pdf", mime="application/pdf", key="ortools_pdf_download",
-            )
-
-            if animate_or:
-                fig_or = build_animated_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
+            if result["key"] != current_key:
+                st.warning(
+                    "⚠️ Die Eingaben haben sich seit dieser Lösung geändert – das alte Ergebnis "
+                    "passt nicht mehr zu den aktuellen Stopps und wird ausgeblendet. Bitte erneut lösen."
+                )
             else:
-                fig_or = build_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
-            st.plotly_chart(fig_or, use_container_width=True, key=f"ortools_plot_{animate_or}")
+                or_routes = result["routes"]
+                or_dist, or_viol = solution_totals(or_routes, D, earliest, latest, service, tw_enabled)
 
-            ortools_summary = {
-                "label": "OR-Tools", "initial_dist": or_dist, "final_dist": or_dist,
-                "initial_viol": or_viol, "final_viol": or_viol, "improvement_pct": None,
-                "final_routes": or_routes, "n_used": sum(1 for r in or_routes if r), "infeasible": False,
-            }
+                hours, cost, co2 = distance_to_business(or_dist, speed_kmh, cost_per_km, co2_per_km)
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Gesamtdistanz", f"{or_dist:.1f} km")
+                m2.metric("Fahrzeit (geschätzt)", f"{hours:.1f} h")
+                m3.metric("Kraftstoffkosten (geschätzt)", f"{cost:.0f} €")
+                m4.metric("CO₂ (geschätzt)", f"{co2:.0f} kg")
+                m5.metric("Rechenzeit", f"{result['elapsed']:.1f} s")
+                if tw_enabled:
+                    st.metric("Zeitfenster-Verletzungen", or_viol)
 
-with tab_compare:
-    st.markdown("### Heuristik-Vergleich")
-    candidates = [summaries["sweep"], summaries["savings"], summaries["beam"], summaries["ga"]]
-    candidates += [ortools_summary] if ortools_summary else []
+                animate_or = st.checkbox("🚚 Route animiert abspielen", key="ortools_animate")
+                pdf_bytes_or = generate_tour_plan_pdf("OR-Tools", or_routes, ids, demands, D, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km)
+                st.download_button(
+                    "📄 Tourenplan als PDF herunterladen", data=pdf_bytes_or,
+                    file_name="tourenplan_ortools.pdf", mime="application/pdf", key="ortools_pdf_download",
+                )
 
-    comp_rows = []
-    for s in candidates:
-        hours, cost, co2 = distance_to_business(s["final_dist"], speed_kmh, cost_per_km, co2_per_km)
-        comp_rows.append(
-            {
-                "Methode": s["label"],
-                "Startdistanz (km)": f"{s['initial_dist']:.1f}" if s["improvement_pct"] is not None else "–",
-                "Enddistanz (km)": f"{s['final_dist']:.1f}",
-                "Fahrzeit (h)": f"{hours:.1f}",
-                "Kosten (€)": f"{cost:.0f}",
-                "CO₂ (kg)": f"{co2:.0f}",
-                "Verbesserung": f"{s['improvement_pct']:.1f} %" if s["improvement_pct"] is not None else "–",
-                **({"Verletzungen (Start)": s["initial_viol"], "Verletzungen (Ende)": s["final_viol"]} if tw_enabled else {}),
-                "Genutzte Fahrzeuge": s["n_used"],
-                "Kapazität überschritten": "ja" if s["infeasible"] else "nein",
-            }
+                if animate_or:
+                    fig_or = build_animated_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
+                else:
+                    fig_or = build_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
+                st.plotly_chart(fig_or, use_container_width=True, key=f"ortools_plot_{animate_or}")
+
+                ortools_summary = {
+                    "label": "OR-Tools", "initial_dist": or_dist, "final_dist": or_dist,
+                    "initial_viol": or_viol, "final_viol": or_viol, "improvement_pct": None,
+                    "final_routes": or_routes, "n_used": sum(1 for r in or_routes if r), "infeasible": False,
+                }
+
+    with tab_compare:
+        st.markdown("### Heuristik-Vergleich")
+        candidates = [summaries["sweep"], summaries["savings"], summaries["beam"], summaries["ga"]]
+        candidates += [ortools_summary] if ortools_summary else []
+
+        comp_rows = []
+        for s in candidates:
+            hours, cost, co2 = distance_to_business(s["final_dist"], speed_kmh, cost_per_km, co2_per_km)
+            comp_rows.append(
+                {
+                    "Methode": s["label"],
+                    "Startdistanz (km)": f"{s['initial_dist']:.1f}" if s["improvement_pct"] is not None else "–",
+                    "Enddistanz (km)": f"{s['final_dist']:.1f}",
+                    "Fahrzeit (h)": f"{hours:.1f}",
+                    "Kosten (€)": f"{cost:.0f}",
+                    "CO₂ (kg)": f"{co2:.0f}",
+                    "Verbesserung": f"{s['improvement_pct']:.1f} %" if s["improvement_pct"] is not None else "–",
+                    **({"Verletzungen (Start)": s["initial_viol"], "Verletzungen (Ende)": s["final_viol"]} if tw_enabled else {}),
+                    "Genutzte Fahrzeuge": s["n_used"],
+                    "Kapazität überschritten": "ja" if s["infeasible"] else "nein",
+                }
+            )
+        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+        st.caption(
+            "Sweep, Savings, Beam Search und der genetische Algorithmus werden alle mit derselben "
+            "eigenen lokalen Suche (2-opt + Or-opt) verbessert (daher Start-/Enddistanz). OR-Tools "
+            "optimiert intern mit einer eigenen Metaheuristik – hier ist nur das Endergebnis ausgewiesen. "
+            "Alle Distanzen werden zur fairen Vergleichbarkeit einheitlich mit derselben Bewertungsfunktion "
+            f"auf demselben Straßennetz berechnet. Fahrzeit/Kosten/CO₂ basieren auf {speed_kmh} km/h, "
+            f"{cost_per_km:.2f} €/km und {co2_per_km:.2f} kg CO₂/km (einstellbar in der Seitenleiste)."
         )
-    st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
-    st.caption(
-        "Sweep, Savings, Beam Search und der genetische Algorithmus werden alle mit derselben "
-        "eigenen lokalen Suche (2-opt + Or-opt) verbessert (daher Start-/Enddistanz). OR-Tools "
-        "optimiert intern mit einer eigenen Metaheuristik – hier ist nur das Endergebnis ausgewiesen. "
-        "Alle Distanzen werden zur fairen Vergleichbarkeit einheitlich mit derselben Bewertungsfunktion "
-        f"auf demselben Straßennetz berechnet. Fahrzeit/Kosten/CO₂ basieren auf {speed_kmh} km/h, "
-        f"{cost_per_km:.2f} €/km und {co2_per_km:.2f} kg CO₂/km (einstellbar in der Seitenleiste)."
-    )
 
-    if tw_enabled:
-        best = min(candidates, key=lambda s: (s["final_viol"], s["final_dist"]))
-        worst = max(candidates, key=lambda s: (s["final_viol"], s["final_dist"]))
-        reason = "wenigste Zeitfenster-Verletzungen, dann kürzeste Distanz"
-    else:
-        best = min(candidates, key=lambda s: s["final_dist"])
-        worst = max(candidates, key=lambda s: s["final_dist"])
-        reason = "kürzeste Gesamtdistanz"
-    st.markdown(f"➡️ **{best['label']}** schneidet hier am besten ab ({reason}).")
+        if tw_enabled:
+            best = min(candidates, key=lambda s: (s["final_viol"], s["final_dist"]))
+            worst = max(candidates, key=lambda s: (s["final_viol"], s["final_dist"]))
+            reason = "wenigste Zeitfenster-Verletzungen, dann kürzeste Distanz"
+        else:
+            best = min(candidates, key=lambda s: s["final_dist"])
+            worst = max(candidates, key=lambda s: s["final_dist"])
+            reason = "kürzeste Gesamtdistanz"
+        st.markdown(f"➡️ **{best['label']}** schneidet hier am besten ab ({reason}).")
 
-    if best["label"] != worst["label"]:
-        best_hours, best_cost, best_co2 = distance_to_business(best["final_dist"], speed_kmh, cost_per_km, co2_per_km)
-        worst_hours, worst_cost, worst_co2 = distance_to_business(worst["final_dist"], speed_kmh, cost_per_km, co2_per_km)
-        cost_saved = worst_cost - best_cost
-        hours_saved = worst_hours - best_hours
-        co2_saved = worst_co2 - best_co2
-        if cost_saved > 0.5:
-            st.info(
-                f"💶 Im Vergleich zur schwächsten Methode hier ({worst['label']}) spart "
-                f"**{best['label']}** ca. **{cost_saved:.0f} € Kraftstoffkosten**, "
-                f"**{hours_saved:.1f} Stunden Fahrzeit** und **{co2_saved:.0f} kg CO₂** – bei einer "
-                f"einzelnen Tourenplanung. Hochgerechnet auf tägliche Touren summiert sich das schnell."
+        if best["label"] != worst["label"]:
+            best_hours, best_cost, best_co2 = distance_to_business(best["final_dist"], speed_kmh, cost_per_km, co2_per_km)
+            worst_hours, worst_cost, worst_co2 = distance_to_business(worst["final_dist"], speed_kmh, cost_per_km, co2_per_km)
+            cost_saved = worst_cost - best_cost
+            hours_saved = worst_hours - best_hours
+            co2_saved = worst_co2 - best_co2
+            if cost_saved > 0.5:
+                st.info(
+                    f"💶 Im Vergleich zur schwächsten Methode hier ({worst['label']}) spart "
+                    f"**{best['label']}** ca. **{cost_saved:.0f} € Kraftstoffkosten**, "
+                    f"**{hours_saved:.1f} Stunden Fahrzeit** und **{co2_saved:.0f} kg CO₂** – bei einer "
+                    f"einzelnen Tourenplanung. Hochgerechnet auf tägliche Touren summiert sich das schnell."
+                )
+
+        with st.expander("📈 Was der Vergleich über viele Testläufe hinweg zeigt"):
+            st.markdown(
+                """
+    Die folgenden Zahlen stammen aus systematischen Tests über 15 (bzw. 9 mit Zeitfenstern)
+    zufällige Probleminstanzen hinweg – nicht aus der oben aktuell angezeigten Instanz,
+    sondern als generelles Muster. Alle vier eigenen Heuristiken durchlaufen dieselbe lokale
+    Suche (2-opt + Or-opt), OR-Tools optimiert komplett eigenständig.
+
+    **Ohne Zeitfenster (reine Distanzminimierung):**
+
+    | Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
+    |---|---|---|---|
+    | Sweep | +4,4 % (−4,8 % bis +26,0 %) | ~11 ms | 2 / 15 |
+    | Savings | +0,5 % (−5,2 % bis +4,4 %) | ~7 ms | 3 / 15 |
+    | Beam Search | +5,5 % (−3,9 % bis +18,7 %) | ~43 ms | 2 / 15 |
+    | Genet. Algorithmus | +3,5 % (−3,7 % bis +18,2 %) | ~152 ms | 3 / 15 |
+    | OR-Tools | Referenz | ~3 s | 5 / 15 |
+
+    Der Sprung gegenüber einer früheren Version dieser Demo (nur 2-opt, ohne Or-opt) ist
+    deutlich: Sweep lag damals im Schnitt 37 % hinter OR-Tools, jetzt nur noch 4–5 %. Or-opt
+    schließt also einen Großteil der Lücke, weil schlechte Konstruktionsentscheidungen
+    (Stopps beim falschen Fahrzeug) jetzt nachträglich korrigiert werden können.
+
+    **Ein Bug in Or-opt selbst, nachträglich gefunden:** Beim finalen Review fiel auf, dass
+    Or-opt beim Wiedereinfügen eines Segments in dieselbe Tour zu viele Positionen als
+    "Ursprungsposition" übersprang (den gesamten Bereich `[start, start+seg_len]` statt nur
+    die eine tatsächliche No-op-Position `start`) – nachrechenbar objektiv falsch. Genauer
+    hingeschaut zeigt sich: Bei einer einzelnen Tour gibt es für die meisten dadurch
+    blockierten Zielrouten einen redundanten alternativen Suchpfad (z. B. erreicht
+    "verschiebe Stopp i" oft dieselbe Zielroute wie "verschiebe Stopp i+1") – der Bug
+    ändert also nicht unbedingt, WELCHE Zielrouten grundsätzlich erreichbar sind, sondern
+    die Reihenfolge, in der Kandidaten geprüft werden. Da die lokale Suche beim ersten
+    verbessernden Zug abbricht (First-Improvement), kann eine andere Prüfreihenfolge trotzdem
+    den gesamten weiteren Suchpfad ändern. Nach der Korrektur wurden alle Benchmark-Zahlen
+    neu gemessen: Sweep und der genetische Algorithmus wurden spürbar besser, Savings und
+    Beam Search minimal schwächer im Schnitt, dafür deutlich konsistenter (kleinere
+    Schwankungsbreite). Ein Beispiel dafür, dass bei Local-Search-Verfahren mit "erster
+    Verbesserung" eine andere Prüfreihenfolge nicht automatisch überall zum besseren
+    Endergebnis führt, weil die Suche dadurch einen anderen Pfad nimmt.
+
+    **Mit Zeitfenstern (Summe Verletzungen über 9 Testfälle):**
+
+    Sweep 40 · Savings 45 · Beam Search 37 · Genet. Algorithmus 36 · **OR-Tools 54**
+
+    **Eine ehrliche Überraschung:** Wir haben zunächst erwartet, dass OR-Tools bei
+    Zeitfenstern klar vorne liegt. Beim Nachrechnen fiel jedoch zunächst ein echter Bug in
+    unserer OR-Tools-Anbindung auf: Das Modell kannte nur die späteste Ankunftszeit, nicht
+    die früheste – dadurch konnte der Solver einen Stopp mit spätem Zeitfenster an den
+    Tourbeginn legen, was in der Nachbewertung zu unnötigem Warten und Folgeverletzungen
+    führte. Nach der Korrektur (früheste Ankunft als Untergrenze im Solver-Modell) sank die
+    Verletzungszahl spürbar (von 79 auf 54) – blieb aber trotzdem höher als bei unseren
+    eigenen Heuristiken. Weder eine höhere Strafgewichtung noch ein längeres Zeitlimit
+    änderten das auf den schwierigsten Testinstanzen: Die Verletzungszahl blieb dort gleich,
+    was auf eine echte Suchgrenze hindeutet und nicht auf ein simples Parameter-Problem.
+
+    **Warum das plausibel ist:** Guided Local Search (OR-Tools' Metaheuristik) ist primär
+    auf Distanzminimierung ausgelegt und bestraft dafür häufig genutzte Kanten – das hilft,
+    aber zielt nicht spezifisch auf Zeitfenster-Verletzungen. Unsere eigene lokale Suche
+    sortiert dagegen explizit lexikografisch: Verletzungen zuerst, Distanz erst danach. Bei
+    eng terminierten Instanzen kann dieser einfachere, aber zielgerichtete Ansatz einem
+    allgemeinen, distanzfokussierten Solver das Wasser reichen.
+
+    **Fazit:** Es gibt kein universell bestes Verfahren. Savings ist überraschend nah an
+    OR-Tools bei reiner Distanzminimierung (im Schnitt sogar leicht davor) und praktisch
+    kostenlos in der Rechenzeit. Bei Zeitfenstern hängt es stark von der konkreten Instanz
+    ab. OR-Tools bleibt die richtige Wahl, wenn zusätzliche, komplexere Nebenbedingungen
+    (mehrere Depots, Fahrerregeln, Pickup & Delivery) dazukommen, die sich in einer
+    eigenen Heuristik nur mit deutlich mehr Aufwand sauber abbilden ließen. Welches
+    Verfahren sich für ein reales Problem lohnt, hängt von Problemgröße, Zeitbudget und
+    Anforderungen ab – genau diese Abwägung ist Teil einer fundierten Beratung.
+    """
             )
 
-    with st.expander("📈 Was der Vergleich über viele Testläufe hinweg zeigt"):
-        st.markdown(
-            """
-Die folgenden Zahlen stammen aus systematischen Tests über 15 (bzw. 9 mit Zeitfenstern)
-zufällige Probleminstanzen hinweg – nicht aus der oben aktuell angezeigten Instanz,
-sondern als generelles Muster. Alle vier eigenen Heuristiken durchlaufen dieselbe lokale
-Suche (2-opt + Or-opt), OR-Tools optimiert komplett eigenständig.
-
-**Ohne Zeitfenster (reine Distanzminimierung):**
-
-| Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
-|---|---|---|---|
-| Sweep | +4,4 % (−4,8 % bis +26,0 %) | ~11 ms | 2 / 15 |
-| Savings | +0,5 % (−5,2 % bis +4,4 %) | ~7 ms | 3 / 15 |
-| Beam Search | +5,5 % (−3,9 % bis +18,7 %) | ~43 ms | 2 / 15 |
-| Genet. Algorithmus | +3,5 % (−3,7 % bis +18,2 %) | ~152 ms | 3 / 15 |
-| OR-Tools | Referenz | ~3 s | 5 / 15 |
-
-Der Sprung gegenüber einer früheren Version dieser Demo (nur 2-opt, ohne Or-opt) ist
-deutlich: Sweep lag damals im Schnitt 37 % hinter OR-Tools, jetzt nur noch 4–5 %. Or-opt
-schließt also einen Großteil der Lücke, weil schlechte Konstruktionsentscheidungen
-(Stopps beim falschen Fahrzeug) jetzt nachträglich korrigiert werden können.
-
-**Ein Bug in Or-opt selbst, nachträglich gefunden:** Beim finalen Review fiel auf, dass
-Or-opt beim Wiedereinfügen eines Segments in dieselbe Tour zu viele Positionen als
-"Ursprungsposition" übersprang (den gesamten Bereich `[start, start+seg_len]` statt nur
-die eine tatsächliche No-op-Position `start`) – nachrechenbar objektiv falsch. Genauer
-hingeschaut zeigt sich: Bei einer einzelnen Tour gibt es für die meisten dadurch
-blockierten Zielrouten einen redundanten alternativen Suchpfad (z. B. erreicht
-"verschiebe Stopp i" oft dieselbe Zielroute wie "verschiebe Stopp i+1") – der Bug
-ändert also nicht unbedingt, WELCHE Zielrouten grundsätzlich erreichbar sind, sondern
-die Reihenfolge, in der Kandidaten geprüft werden. Da die lokale Suche beim ersten
-verbessernden Zug abbricht (First-Improvement), kann eine andere Prüfreihenfolge trotzdem
-den gesamten weiteren Suchpfad ändern. Nach der Korrektur wurden alle Benchmark-Zahlen
-neu gemessen: Sweep und der genetische Algorithmus wurden spürbar besser, Savings und
-Beam Search minimal schwächer im Schnitt, dafür deutlich konsistenter (kleinere
-Schwankungsbreite). Ein Beispiel dafür, dass bei Local-Search-Verfahren mit "erster
-Verbesserung" eine andere Prüfreihenfolge nicht automatisch überall zum besseren
-Endergebnis führt, weil die Suche dadurch einen anderen Pfad nimmt.
-
-**Mit Zeitfenstern (Summe Verletzungen über 9 Testfälle):**
-
-Sweep 40 · Savings 45 · Beam Search 37 · Genet. Algorithmus 36 · **OR-Tools 54**
-
-**Eine ehrliche Überraschung:** Wir haben zunächst erwartet, dass OR-Tools bei
-Zeitfenstern klar vorne liegt. Beim Nachrechnen fiel jedoch zunächst ein echter Bug in
-unserer OR-Tools-Anbindung auf: Das Modell kannte nur die späteste Ankunftszeit, nicht
-die früheste – dadurch konnte der Solver einen Stopp mit spätem Zeitfenster an den
-Tourbeginn legen, was in der Nachbewertung zu unnötigem Warten und Folgeverletzungen
-führte. Nach der Korrektur (früheste Ankunft als Untergrenze im Solver-Modell) sank die
-Verletzungszahl spürbar (von 79 auf 54) – blieb aber trotzdem höher als bei unseren
-eigenen Heuristiken. Weder eine höhere Strafgewichtung noch ein längeres Zeitlimit
-änderten das auf den schwierigsten Testinstanzen: Die Verletzungszahl blieb dort gleich,
-was auf eine echte Suchgrenze hindeutet und nicht auf ein simples Parameter-Problem.
-
-**Warum das plausibel ist:** Guided Local Search (OR-Tools' Metaheuristik) ist primär
-auf Distanzminimierung ausgelegt und bestraft dafür häufig genutzte Kanten – das hilft,
-aber zielt nicht spezifisch auf Zeitfenster-Verletzungen. Unsere eigene lokale Suche
-sortiert dagegen explizit lexikografisch: Verletzungen zuerst, Distanz erst danach. Bei
-eng terminierten Instanzen kann dieser einfachere, aber zielgerichtete Ansatz einem
-allgemeinen, distanzfokussierten Solver das Wasser reichen.
-
-**Fazit:** Es gibt kein universell bestes Verfahren. Savings ist überraschend nah an
-OR-Tools bei reiner Distanzminimierung (im Schnitt sogar leicht davor) und praktisch
-kostenlos in der Rechenzeit. Bei Zeitfenstern hängt es stark von der konkreten Instanz
-ab. OR-Tools bleibt die richtige Wahl, wenn zusätzliche, komplexere Nebenbedingungen
-(mehrere Depots, Fahrerregeln, Pickup & Delivery) dazukommen, die sich in einer
-eigenen Heuristik nur mit deutlich mehr Aufwand sauber abbilden ließen. Welches
-Verfahren sich für ein reales Problem lohnt, hängt von Problemgröße, Zeitbudget und
-Anforderungen ab – genau diese Abwägung ist Teil einer fundierten Beratung.
-"""
-        )
-
-    st.markdown("**Finale Touren im direkten Vergleich**")
-    cols = st.columns(len(candidates))
-    for col, s in zip(cols, candidates):
-        with col:
-            st.caption(f"{s['label']} (final)")
-            fig_c = build_figure(depot, coords, ids, s["final_routes"], paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
-            st.plotly_chart(fig_c, use_container_width=True, key=f"compare_{s['label']}")
+        st.markdown("**Finale Touren im direkten Vergleich**")
+        cols = st.columns(len(candidates))
+        for col, s in zip(cols, candidates):
+            with col:
+                st.caption(f"{s['label']} (final)")
+                fig_c = build_figure(depot, coords, ids, s["final_routes"], paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
+                st.plotly_chart(fig_c, use_container_width=True, key=f"compare_{s['label']}")
 
 with st.expander("Wie funktioniert diese Demo?"):
     st.markdown(

@@ -48,7 +48,103 @@ def assert_ok(at):
 def test_default_load():
     at = fresh_app()
     assert_ok(at)
-    assert len(at.tabs) == 6  # Sweep, Savings, Beam, GA, OR-Tools, Vergleich
+    assert len(at.tabs) == 6  # Sweep, Savings, Beam, GA, OR-Tools, Vergleich (im Detail-Expander)
+
+
+def test_primary_view_shows_four_business_metrics():
+    """Die neue Primäransicht ('Ihre optimierte Route') soll ohne jede
+    Zusatz-Interaktion sofort Distanz, Fahrzeit, Kosten und CO2 zeigen."""
+    at = fresh_app()
+    assert_ok(at)
+    labels = [m.label for m in at.metric[:4]]
+    assert labels == ["Distanz", "Fahrzeit", "Kraftstoffkosten", "CO₂"]
+
+
+def test_primary_view_selects_true_best_of_four_own_methods():
+    """Die Primäransicht muss exakt die beste (kürzeste Enddistanz) der vier
+    eigenen Methoden zeigen - unabhängig aus der Vergleichstabelle im
+    Detail-Expander nachgerechnet, nicht nur behauptet."""
+    at = fresh_app()
+    assert_ok(at)
+    primary_dist_str = at.metric[0].value  # "395.0 km"
+    primary_dist = float(primary_dist_str.replace(" km", ""))
+
+    comp_df = [d.value for d in at.dataframe if "Methode" in d.value.columns][0]
+    own_methods = comp_df[comp_df["Methode"] != "OR-Tools"]
+    best_dist = own_methods["Enddistanz (km)"].astype(float).min()
+
+    assert primary_dist == pytest.approx(best_dist, abs=0.05)
+
+
+def test_primary_view_pdf_button_present():
+    at = fresh_app()
+    assert_ok(at)
+    primary_pdf = [d for d in at.download_button if d.key == "primary_pdf_download"]
+    assert len(primary_pdf) == 1
+    assert "PDF" in primary_pdf[0].label
+
+
+def test_primary_view_savings_message_shown_by_default():
+    """Bei der Standardkonfiguration sollte die unoptimierte Ausgangslage
+    (Stopps in Eingabereihenfolge, keine lokale Suche) klar schlechter sein
+    als die beste eigene Methode - die Einsparungsnachricht sollte greifen."""
+    at = fresh_app()
+    assert_ok(at)
+    successes = [str(s.value) for s in at.success]
+    savings_msgs = [s for s in successes if "unoptimierte" in s]
+    assert savings_msgs, "Erwartete Einsparungsnachricht in der Primäransicht nicht gefunden"
+    assert "Kraftstoffkosten" in savings_msgs[0]
+    assert "Stunden Fahrzeit" in savings_msgs[0]
+    assert "CO₂" in savings_msgs[0]
+
+
+def test_primary_view_no_algorithm_name_in_headline():
+    """Kernanforderung der Umstrukturierung: die Primäransicht soll das
+    Ergebnis in den Vordergrund stellen, nicht den Algorithmusnamen. Prüft,
+    dass die Überschrift selbst keinen der vier Methodennamen enthält (die
+    Zuordnung darf in einer klein gedruckten Caption stehen, siehe separater
+    Test)."""
+    at = fresh_app()
+    assert_ok(at)
+    headlines = [str(m.value) for m in at.markdown if "Ihre optimierte Route" in str(m.value)]
+    assert headlines, "Überschrift 'Ihre optimierte Route' nicht gefunden"
+    headline = headlines[0]
+    for method_name in ["Sweep", "Savings", "Beam Search", "Genetischer Algorithmus"]:
+        assert method_name not in headline, f"Überschrift sollte '{method_name}' nicht enthalten"
+
+
+def test_primary_view_method_attribution_present_in_caption():
+    """Transparenz-Gegenstück zum vorherigen Test: welche Methode das Ergebnis
+    geliefert hat, soll nicht verschwiegen, sondern zurückhaltend (als
+    Caption, nicht als Überschrift) genannt werden."""
+    at = fresh_app()
+    assert_ok(at)
+    captions = [str(c.value) for c in at.caption]
+    attribution = [c for c in captions if "eigenen Optimierungsmethoden" in c]
+    assert attribution, "Erwarteter Hinweis auf die zugrunde liegende Methode fehlt"
+
+
+def test_technical_comparison_expander_contains_all_tabs():
+    """Stellt sicher, dass der 'Wie wir das erreichen'-Expander weiterhin
+    alle sechs Detail-Tabs enthält - die Umstrukturierung darf keine
+    bestehende Funktionalität verstecken oder entfernt haben."""
+    at = fresh_app()
+    assert_ok(at)
+    tab_labels = [t.label for t in at.tabs]
+    for expected in ["Sweep", "Savings", "Beam Search", "GA", "OR-Tools", "Vergleich"]:
+        assert any(expected in label for label in tab_labels), f"Tab '{expected}' nicht gefunden"
+
+
+def test_primary_view_handles_infeasible_gracefully():
+    """Randfall: Kapazität reicht strukturell nicht aus. Die Primäransicht
+    darf nicht abstürzen und soll (falls tatsächlich überladen) eine Warnung
+    zeigen statt die Kapazitätsüberschreitung zu verschweigen. Ob die
+    konkrete Zufallsinstanz tatsächlich überladen ist, hängt vom Seed ab -
+    der Test prüft daher primär, dass kein Absturz auftritt (assert_ok)."""
+    at = fresh_app()
+    at.sidebar.slider[1].set_value(1).run(timeout=TIMEOUT)  # nur 1 Fahrzeug
+    at.sidebar.slider[2].set_value(5).run(timeout=TIMEOUT)  # sehr geringe Kapazität
+    assert_ok(at)
 
 
 def test_regenerate_button():
@@ -188,7 +284,9 @@ def test_pdf_download_buttons_present_for_all_own_methods():
     at = fresh_app()
     assert_ok(at)
     labels = [d.label for d in at.download_button]
-    assert len(labels) == 4  # Sweep, Savings, Beam, GA (OR-Tools-Button erst nach Lösen)
+    # Primäransicht (1) + Sweep, Savings, Beam, GA (4) = 5. OR-Tools-Button
+    # erscheint erst nach Lösen (Button-gesteuert).
+    assert len(labels) == 5
     assert all("PDF" in l for l in labels)
 
 
@@ -200,7 +298,7 @@ def test_pdf_download_button_appears_for_ortools_after_solving():
     solve_btn.click().run(timeout=TIMEOUT)
     assert_ok(at)
     labels = [d.label for d in at.download_button]
-    assert len(labels) == 5
+    assert len(labels) == 6  # Primäransicht (1) + Sweep, Savings, Beam, GA (4) + OR-Tools (1)
 
 
 def test_stale_ortools_result_after_input_change_does_not_crash():
@@ -372,7 +470,35 @@ def test_permalink_updates_on_change():
     assert qp.get("n_stops") in (["21"], "21")
 
 
-def test_permalink_restores_settings_from_url():
+def test_seed_change_alone_regenerates_stops():
+    """Regressionstest für einen gefundenen Bug (identisches Muster in der
+    Packungsoptimierung-Demo gefunden und dort zuerst behoben): Der
+    Regenerierungs-Trigger prüfte nur n_stops, nicht den Seed. Ein reiner
+    Seed-Wechsel (ohne n_stops zu ändern) hatte dadurch keine Wirkung auf die
+    tatsächlich generierten Stopps, obwohl die Sidebar bereits den neuen Seed
+    zeigte - verwirrend und funktional falsch, da der Seed-Regler seinem
+    Namen nach genau das bewirken soll."""
+    at = fresh_app()
+    assert_ok(at)
+    stops_before = at.session_state["stops"].copy()
+
+    at.sidebar.number_input[0].set_value(999).run(timeout=TIMEOUT)
+    assert_ok(at)
+    stops_after = at.session_state["stops"]
+    assert not stops_before.equals(stops_after), "Stopps sollten sich nach reinem Seed-Wechsel ändern"
+
+
+def test_n_stops_change_still_regenerates_stops():
+    """Stellt sicher, dass der bestehende n_stops-Trigger durch die Erweiterung
+    um den Seed nicht kaputt gegangen ist."""
+    at = fresh_app()
+    assert_ok(at)
+    at.sidebar.slider[0].set_value(25).run(timeout=TIMEOUT)
+    assert_ok(at)
+    assert len(at.session_state["stops"]) == 25
+
+
+
     at = AppTest.from_file(APP_PATH)
     at.query_params["n_stops"] = "19"
     at.query_params["n_vehicles"] = "4"
