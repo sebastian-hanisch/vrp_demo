@@ -16,19 +16,26 @@ from vrp_pdf_export import generate_tour_plan_pdf
 from vrp_visualization import build_animated_figure, build_figure
 
 
-def render_heuristic_panel(prefix, label, history, infeasible_construction, depot, coords, ids, demands, D, paths_lookup, node_positions, r_edges_xy, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km):
+def render_heuristic_panel(prefix, label, history, depot, coords, ids, demands, D, paths_lookup, node_positions, r_edges_xy, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km):
     """Rendert ein komplettes Heuristik-Panel (Slider, Metriken, Animation,
     PDF-Export, Karte, Distanzverlauf) und gibt eine Zusammenfassung für den
     Vergleichs-Tab zurück. `history` ist die Rückgabe von
     local_search_history: eine Liste von (Routen-Snapshot, Distanz,
-    Verletzungen) je Verbesserungsschritt."""
+    Zeitfenster-Verletzungen, Kapazitätsüberschreitung) je
+    Verbesserungsschritt.
+
+    WICHTIG, auf Nutzeranfrage korrigiert: nahm zuvor einen separaten
+    `infeasible_construction`-Parameter entgegen, der nur den Status NACH
+    der Konstruktion widerspiegelte - nicht das tatsächlich angezeigte
+    Ergebnis nach der lokalen Suche. Die lokale Suche konnte eine
+    Kapazitätsverletzung seitdem beheben (oder in seltenen Fällen auch
+    nicht), die Anzeige blieb aber auf dem alten Stand. Jetzt wird der
+    Kapazitätsstatus direkt aus dem letzten History-Eintrag berechnet -
+    spiegelt immer das tatsächlich angezeigte Ergebnis wider."""
     n_steps = len(history)
     initial_dist, initial_viol = history[0][1], history[0][2]
-    final_dist, final_viol = history[-1][1], history[-1][2]
+    final_dist, final_viol, final_cap = history[-1][1], history[-1][2], history[-1][3]
     improvement_pct = 0.0 if initial_dist == 0 else 100 * (initial_dist - final_dist) / initial_dist
-
-    if infeasible_construction:
-        st.warning(f"⚠️ {label}: Mindestens ein Fahrzeug wird kapazitätsmäßig überladen (zu wenige Fahrzeuge/Kapazität für die Nachfrage).")
 
     if n_steps > 1:
         auto_play = st.checkbox("▶️ Automatisch abspielen", key=f"{prefix}_auto")
@@ -40,6 +47,24 @@ def render_heuristic_panel(prefix, label, history, infeasible_construction, depo
         auto_play = False
         step = 0
         st.info("Die lokale Suche hat keine verbessernde Vertauschung gefunden.")
+
+    # WICHTIG, auf Nutzeranfrage korrigiert: zeigte zuvor immer den
+    # Kapazitätsstatus des ENDERGEBNISSES (history[-1]), unabhängig vom
+    # gerade per Regler ausgewählten Schritt - anders als alle übrigen
+    # Kennzahlen (Distanz, Zeitfenster-Verletzungen), die korrekt
+    # history[step] folgen. Blätterte man zu einem früheren, noch
+    # kapazitätsverletzten Schritt zurück (z. B. um dort das PDF
+    # herunterzuladen), erschien trotzdem keine Warnung, obwohl die
+    # tatsächlich angezeigte/exportierte Route verletzt war. Jetzt wie alle
+    # anderen Kennzahlen an history[step] gebunden.
+    step_cap = history[step][3]
+    step_infeasible = step_cap > 0
+    if step_infeasible:
+        step_hint = "" if step == n_steps - 1 else f" (beim aktuell angezeigten Schritt {step} von {n_steps - 1})"
+        st.warning(
+            f"⚠️ {label}: Mindestens ein Fahrzeug wird kapazitätsmäßig überladen (zu wenige "
+            f"Fahrzeuge/Kapazität für die Nachfrage, Überschreitung: {step_cap:.0f}){step_hint}."
+        )
 
     dist_delta_pct = 0.0 if initial_dist == 0 else 100 * (history[step][1] - initial_dist) / initial_dist
     hours, cost, co2 = distance_to_business(history[step][1], speed_kmh, cost_per_km, co2_per_km)
@@ -121,5 +146,5 @@ def render_heuristic_panel(prefix, label, history, infeasible_construction, depo
         "label": label, "initial_dist": initial_dist, "final_dist": final_dist,
         "initial_viol": initial_viol, "final_viol": final_viol,
         "improvement_pct": improvement_pct, "final_routes": history[-1][0],
-        "n_used": sum(1 for r in history[-1][0] if r), "infeasible": infeasible_construction,
+        "n_used": sum(1 for r in history[-1][0] if r), "infeasible": final_cap > 0,
     }

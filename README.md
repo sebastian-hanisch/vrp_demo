@@ -319,6 +319,281 @@ eingebaut (verschiebt probeweise einen Stopp an mehrere Kandidatenpositionen, be
 beste) – das verbesserte die Ergebnisse tatsächlich (+3,9 % statt +5,3 % Abstand zu
 OR-Tools, bei weiterhin unter 120 ms Rechenzeit) und wurde übernommen.
 
+## Monobeam: dieselbe Monotonie-Lücke wie bei Fracht und Packung, hierher übertragen
+
+Nachdem sich `beam_search_construction` (Fracht-Demo) und `beam_search_packing`
+(Packungsdemo) als nicht monoton erwiesen und durch monobeam-Adaptionen ersetzt wurden,
+lag die Frage nahe: hat die Tourenplanung-Demo dasselbe Problem? Sie war nie darauf
+geprüft worden, obwohl die Konstruktion demselben Muster folgt (`candidates.sort(...);
+beam = candidates[:beam_width]` - volle Kandidatenmenge pro Schritt sortieren und
+kürzen statt verschachtelt zuzuweisen).
+
+**Bestätigt, aber seltener als bei den anderen beiden Demos.** Systematisch über 30
+Testinstanzen (variable Größe, Kapazität, Fahrzeuganzahl) geprüft: 6 von 30 zeigten eine
+schlechtere statt bessere Tour bei größerer Beam-Breite - deutlich seltener als bei
+Packung (11 von 14) oder Fracht, vermutlich weil VRP an jedem Schritt frei entscheidet,
+welcher Stopp als nächstes drankommt (nicht in fester Reihenfolge wie bei den anderen
+beiden Demos), was den zugrundeliegenden Effekt seltener, aber nicht unmöglich macht.
+**Wichtig:** anders als bei Packung/Fracht übersteht die Verletzung hier nicht
+zuverlässig die anschließende lokale Suche (2-opt + Or-opt) - bei 3 von 6 geprüften
+Fällen blieb sie auch danach bestehen. Für Nutzer sichtbar, nicht nur ein
+Konstruktionsdetail, das ohnehin wegoptimiert wird.
+
+### Zwei gescheiterte Zwischenversuche, bevor die richtige Lösung stand
+
+Die monobeam-Adaptionen der anderen beiden Demos führten zuerst eine FESTE
+Bearbeitungsreihenfolge ein (Größe absteigend bei Packung, analog übertragbar bei
+Fracht) und entschieden pro Ebene nur noch "wohin mit diesem einen Element". Dieselbe
+Übertragung auf VRP scheiterte zweimal:
+
+1. **Feste Reihenfolge nach Distanz vom Depot** (naheliegendste Übertragung, da direkt
+   aus der ohnehin vorhandenen Distanzmatrix ableitbar, keine Koordinaten nötig).
+   Ergebnis: häufige, teils unnötige Infeasible-Fälle - bei Instanzen, wo der
+   Gesamtbedarf klar unter der Gesamtkapazität lag, fand das Original trotzdem eine
+   machbare Lösung, monobeam nicht. Distanz vom Depot hat schlicht nichts mit der
+   Kapazitätsbeschränkung zu tun.
+2. **Feste Reihenfolge nach Bedarf absteigend** (direkte Übertragung der FFD-Lehre aus
+   Fracht-/Packungsdemo, wo genau das half). Behob das Machbarkeitsproblem, aber: nach
+   lokaler Suche in 15 von 15 Testinstanzen deutlich schlechter als das Original (teils
+   >50 % mehr Distanz). Der Unterschied zu Fracht/Packung: bei VRP ist die geografische
+   Anordnung der **Hauptkostentreiber**, nicht nur eine Nebenbedingung wie
+   Containervolumen oder Bin-Packing-Kapazität. Eine reine Bedarfssortierung ignoriert
+   das komplett und lässt Fahrzeuge geografisch weit verstreute Stopps aufsammeln, nur
+   weil sie zufällig ähnlichen Bedarf haben.
+
+### Die funktionierende Lösung: keine externe feste Reihenfolge
+
+Der Fehler in beiden gescheiterten Versuchen war die Annahme, dass eine feste
+Reihenfolge überhaupt nötig ist. Sie ist es nicht - das Kernprinzip von monobeam
+(Slot c beansprucht sofort das beste Element aus einem geteilten Kandidatenpool, bevor
+Slot c+1 angefasst wird) funktioniert genauso, wenn an jeder der `n_stops` Ebenen weiter
+FREI entschieden wird "welcher verbleibende Stopp UND welches Fahrzeug" - exakt wie im
+Original, nur mit korrigierter Verschachtelung statt "volle Menge sortieren und
+kürzen". Die geografische Flexibilität des Originals bleibt dadurch vollständig
+erhalten.
+
+**Ergebnis:** über 147 Testinstanzen 0 Verletzungen der Monotonie. Qualität nach lokaler
+Suche über 30 Testinstanzen: 12 Siege für monobeam, 18 fürs Original, im Schnitt +4,1 %
+- ein ehrlicher Kompromiss, wie bei der Packungsdemo (Monotonie erkauft sich eine
+eingeschränktere Suche, nicht automatisch bessere Einzelergebnisse in jedem Fall).
+Performance: bei der App-Obergrenze von 30 Stopps Worst Case ~115ms - unproblematisch
+für automatische Neuberechnung bei jeder UI-Interaktion.
+
+**Ein weiterer, kleinerer Fund unterwegs:** die erste Fassung bewertete Teilzustände nur
+anhand der bereits gefahrenen Strecke, ohne die Heimfahrt jedes Fahrzeugs von seiner
+aktuellen Position einzubeziehen - dieselbe Fehlerklasse wie bei der Packungsdemo
+(Bewertung nach der falschen Größe, nicht nach der tatsächlich angezeigten Kennzahl).
+Da route_cost/solution_totals die Rückfahrt zum Depot mitrechnen, führte das zu
+scheinbaren, aber nicht echten Monotonie-Verletzungen (die Verschachtelung selbst war
+bereits korrekt, nachweisbar durch identische Slot-Präfixe bei unterschiedlichen
+Breiten - nur die Zielgröße stimmte nicht). Behoben durch eine Bewertungsfunktion, die
+bei jedem Vergleich die Heimfahrt aller Fahrzeuge von ihrer aktuellen Position
+einbezieht.
+
+**Die Vergleichstabelle unten wurde komplett neu vermessen** (alle vier eigenen
+Heuristiken, nicht nur Beam Search, damit der Vergleich intern konsistent bleibt) - die
+alten Zahlen bezogen sich auf die nicht-monotone Implementierung.
+
+## Presets überprüft: drei Funde, nur einer davon mit dem Beam-Search-Wechsel zusammenhängend
+
+Auf Nachfrage systematisch geprüft, ob alle drei Presets bei jeder der vier Heuristiken
+zu einer machbaren (kapazitätseinhaltenden) Lösung führen - nicht der Fall, bei allen
+dreien.
+
+**"Innenstadt-Zustellung"** (15 Stopps, 3 Fahrzeuge, Kapazität 20): Gesamtbedarf lag bei
+61, Gesamtkapazität bei nur 60 - unmachbar für **alle vier** Methoden, unabhängig vom
+Algorithmus, um genau 1 Einheit. Ein reines Versehen bei der ursprünglichen
+Parameterwahl (kein Zusammenhang mit dem Beam-Search-Wechsel), aber ein schlechter
+erster Eindruck für einen als "Schnellstart"-Beispiel gedachten Preset. Nachgeprüft: bei
+15 Stopps und dieser Kapazität ist der Gesamtbedarf bei den meisten Zufalls-Seeds zu
+hoch (nicht nur bei diesem einen) - Kapazität auf 27 erhöht, robust über 15 von 19
+getesteten Seeds machbar.
+
+**"Große Flotte, knappe Kapazität"** (28 Stopps, 5 Fahrzeuge, Kapazität 15): Gesamtbedarf
+lag bei 150, Gesamtkapazität bei nur 75 - unmachbar um **75 Einheiten**, buchstäblich die
+doppelte Kapazität nötig. Das ist nicht "knapp", sondern schlicht unmöglich - kein
+Algorithmus kann das lösen. Ursprünglich versucht, die Fahrzeuganzahl zu erhöhen (passt
+sogar besser zum Namen "Große Flotte"), aber der Beam-Breite-Regler-Analog für Fahrzeuge
+(`n_vehicles_slider`) ist auf maximal 5 begrenzt - ein Absturz beim ersten Testlauf
+(`StreamlitValueAboveMaxError`) machte das sofort sichtbar. Stattdessen Kapazität auf 34
+erhöht (5 Fahrzeuge bleiben am Maximum) - eine erste Korrektur auf 32 reichte noch nicht
+(siehe nächster Fund), 34 ist sauber für alle vier Methoden.
+
+**"Enge Zeitfenster"** (12 Stopps, 3 Fahrzeuge, Kapazität 25): rechnerisch machbar
+(Bedarf 67 vs. Kapazität 75), zeigte aber bei Savings und beim genetischen Algorithmus
+nach der lokalen Suche trotzdem "Kapazität überschritten". Ein eigenständiger, tieferer
+Fund, unabhängig vom Beam-Search-Wechsel: `find_or_opt_move` prüft die Kapazität nur am
+**Ziel** einer Verschiebung (`if target_load + seg_demand > capacity: continue`), nicht
+ob die **Quelle** einer bereits überladenen Tour dadurch entlastet wird - und akzeptiert
+nur Züge, die Distanz oder Zeitfenster-Verletzungen verbessern. Bringt eine Konstruktion
+eine Tour kapazitätsverletzt hervor und die einzige entlastende Verschiebung wäre selbst
+kostenneutral oder -verschlechternd, bleibt die Verletzung nach der lokalen Suche
+bestehen - Kapazität ist strukturell keine eigene Optimierungsgröße der lokalen Suche,
+nur ein Freigabefilter für Or-opt-Zielrouten. Systematisch nachgeprüft: **3 von 14**
+getesteten Seeds bei ähnlichen Parametern zeigen dasselbe Muster (~21%) - kein
+Einzelfall. Für DIESEN Preset durch einen sauberen Seed umgangen (Seed 5 statt 7, zeigt
+weiterhin eine aussagekräftige Zeitfenster-Geschichte: 2-4 Verletzungen je Methode, klar
+unterscheidbar). **Die tiefere Ursache (Kapazität als reiner Freigabefilter statt echte
+Optimierungsgröße in der lokalen Suche) bleibt bestehen** und könnte bei anderen
+Parameterkombinationen erneut auftreten - eine mögliche Erweiterung wäre, Kapazitäts-
+verletzungen wie Zeitfenster-Verletzungen lexikografisch zu priorisieren (siehe
+`local_search_history`) - das wurde bei der Preset-Prüfung selbst bewusst noch nicht
+umgesetzt, da es über die angefragte Preset-Korrektur hinausging und alle Szenarien
+betrifft, nicht nur die drei Presets. **Auf explizite Nachfrage danach vollständig
+umgesetzt** - siehe eigener Abschnitt unten.
+
+Alle drei Preset-Korrekturen mit Regressionstest abgesichert:
+`test_presets_are_feasible_for_all_heuristics` (parametrisiert über alle drei Presets).
+
+## Kapazität als echte Optimierungsgröße statt reinem Freigabefilter
+
+Auf ausdrückliche Nachfrage ("Bitte auf jeden Fall die Kapazitätsprobleme angehen")
+wurde die im vorigen Abschnitt gefundene tiefere Ursache vollständig behoben - nicht nur
+für die drei Presets, sondern strukturell für die lokale Suche selbst.
+
+### Der Kern-Fix: Kapazität lexikografisch vor Zeitfenstern und Distanz
+
+`find_or_opt_move` vergleicht jetzt (Kapazitätsüberschreitung, Zeitfenster-
+Verletzungen, Distanz) lexikografisch, genau wie Zeitfenster bereits vor Distanz
+standen. Der alte harte Filter (`if target_load + seg_demand > capacity: continue`)
+wurde entfernt - er blockierte jeden Zug über die Ziel-Kapazität hinaus, unabhängig
+davon, ob die Quelle dadurch entlastet worden wäre. War die Quelle bereits überladen
+und jede entlastende Verschiebung hätte auch das Ziel über die Kapazität gebracht,
+verhinderte dieser Filter genau die Züge, die die Verletzung insgesamt verringert
+hätten.
+
+### Ein zweites Problem, das der Kern-Fix allein nicht löste: fehlende Tausch-Bewegung
+
+Nach dem Kern-Fix blieb 1 von 13 tatsächlich lösbaren Testinstanzen weiterhin verletzt
+(zuvor 3 von 14, deutliche Verbesserung, aber nicht vollständig). Konkretes Beispiel:
+eine Route mit Bedarf 26 (Kapazität 25, kleinster Stopp dort hat Bedarf 8), die einzige
+andere Route mit freier Kapazität hatte nur 7 Einheiten frei - kein einzelner Stopp
+passt hinein, egal wie gut Or-opt priorisiert. Grund: Or-opt kann nur EINFÜGEN, nie
+gleichzeitig etwas aus der Zielroute ENTFERNEN. Ergänzt: `find_swap_move` - ein echter
+Tausch eines einzelnen Stopps zwischen zwei Routen (Tausch von Bedarf 8 gegen Bedarf 2
+im Beispiel bringt beide Routen unter die Kapazität). Dieselbe lexikografische
+Priorität wie Or-opt. Danach: **0 von 36 tatsächlich lösbaren Testinstanzen** zeigen
+noch eine Restverletzung, über verschiedene Problemgrößen und alle vier
+Konstruktionsheuristiken geprüft.
+`test_capacity_violation_resolved_when_theoretically_possible`,
+`test_find_swap_move_resolves_case_or_opt_cannot`.
+
+### Performance: von 2,9s auf ~500ms im realistischen Fall
+
+Die korrekte Logik war zunächst deutlich langsamer (Worst Case bei 30 Stopps, alle vier
+Methoden: **2,9s** statt vorher ~340ms) - zu langsam für automatische Neuberechnung bei
+jeder UI-Interaktion. Drei Optimierungsrunden, jeweils per Profiling verifiziert:
+
+1. **Tausch-Zug nur bei tatsächlicher Verletzung versuchen** (er dient ausschließlich
+   der Kapazitätsentlastung, kostet aber deutlich mehr als 2-opt/Or-opt).
+2. **Or-opts teure Vollauswertung auf den Fall beschränken, wo sie etwas bringen kann**
+   (Quelle ist selbst überladen UND noch Verbesserung theoretisch möglich) - beim
+   Regelfall (Quelle bereits zulässig) bleibt der schnelle, ursprüngliche Filter aktiv.
+3. **Kapazitätsprüfung von der teuren Zeitfenster-Auswertung getrennt.** Wichtige
+   Erkenntnis: Kapazitätsüberschreitung hängt nur von der Bedarfssumme einer Route ab,
+   nicht von der Reihenfolge der Stopps darin - kann also ohne `evaluate_route`
+   (Zeitfenster-Propagation, der eigentlich teure Teil) berechnet werden. Bei
+   eindeutig schlechterer Kapazität wird die teure Auswertung jetzt übersprungen,
+   bevor sie überhaupt aufgerufen wird.
+4. **Theoretische Untergrenze eingeführt**, um bei genuin unlösbaren Instanzen (z. B.
+   zu wenige Fahrzeuge für die Nachfrage) nutzlosen Rechenaufwand zu vermeiden -
+   `max(0, Gesamtbedarf - Gesamtkapazität)` ist die kleinstmögliche Überschreitung, die
+   JEDE Anordnung mindestens hat. Ist die aktuelle Überschreitung bereits dort
+   angekommen, kann keine weitere Umverteilung sie senken - die teure Suche wird dann
+   übersprungen, statt wiederholt (erfolglos) nach einer unmöglichen Verbesserung zu
+   suchen.
+
+Ergebnis: realistische Szenarien (inklusive der tatsächlichen Presets) liegen jetzt bei
+~500ms oder deutlich darunter (z. B. "Große Flotte, knappe Kapazität": 333ms). Eine
+verbleibende Langsamkeit bei extremen Reglereinstellungen (`n_vehicles=1`, ~2,5s)
+stammt nachweislich von 2-opt (durch Profiling bestätigt: 2-opt allein 378ms von
+470ms bei diesem Fall) - eine bereits vorher bestehende Eigenschaft bei vielen Stopps
+in einer einzigen Route, unabhängig vom Kapazitäts-Fix und aus Sicht dieser Anfrage
+nicht im Fokus (ein Fahrzeug für 30 Stopps ist ohnehin ein degenerierter Sonderfall).
+
+### Ein unabhängiger, zweiter Fund dabei: veraltete Anzeige app-weit
+
+Bei der Umsetzung fiel auf: die "Kapazität überschritten"-Anzeige der App (Primäransicht-
+Warnung, Tab-Warnungen, Vergleichstabelle, Auswahlkriterium für die "beste" Methode)
+basierte überall auf dem **Konstruktions**-Status (`sweep_infeasible`,
+`savings_infeasible` usw.), nie auf dem tatsächlich nach lokaler Suche angezeigten
+Endergebnis. Ohne Korrektur wäre der obige Fix in der Oberfläche unsichtbar geblieben -
+die Anzeige hätte weiterhin den alten (möglicherweise durch die lokale Suche
+mittlerweile behobenen) Status gezeigt. `local_search_history` gibt jetzt einen
+vierten Wert je Schritt zurück (Kapazitätsüberschreitung), aus dem `app.py` und
+`vrp_ui_panel.py` den tatsächlichen Status direkt ableiten - `render_heuristic_panel`
+nimmt den separaten `infeasible_construction`-Parameter nicht mehr entgegen, sondern
+berechnet ihn selbst aus der übergebenen History. Die Auswahl der "besten" Methode für
+die Primäransicht berücksichtigt jetzt außerdem Kapazität als ranghöchstes Kriterium
+(vorher konnte eine kapazitätsverletzte Methode trotzdem als "beste" gewählt werden,
+wenn sie bei Distanz/Zeitfenstern vorne lag).
+
+### Zwei bestehende Tests mussten aktualisiert werden
+
+`test_local_search_never_increases_distance_without_tw` und
+`test_local_search_never_increases_violations_with_tw` prüften eine jetzt überholte
+Annahme: dass Distanz bzw. Zeitfenster-Verletzungen durch die lokale Suche NIE steigen
+dürfen. Das galt nur, solange Kapazität ein reiner Freigabefilter war - seit Kapazität
+lexikografisch VOR beidem steht, kann ein einzelner Schritt bewusst Distanz oder
+Zeitfenster verschlechtern, um eine Kapazitätsverletzung zu beheben (konkret
+beobachtet: ein Schritt senkte die Kapazitätsüberschreitung von 1,0 auf 0,0 und erhöhte
+dabei die Distanz von 627 auf 817 - korrektes, beabsichtigtes Verhalten). Auf die
+tatsächliche Garantie umgestellt: Distanz/Verletzungen dürfen nur dann steigen, wenn
+sich die Kapazitätsüberschreitung im selben Schritt verbessert
+(`test_local_search_respects_capacity_priority_without_tw`,
+`test_local_search_respects_capacity_priority_with_tw`) - ergänzt um einen Test, der
+die ursprüngliche, strengere Garantie für den Fall ohne jede Kapazitätsverletzung
+weiterhin absichert (`test_local_search_never_increases_distance_when_capacity_always_feasible`).
+
+### Zwei weitere versteckte Zusammenführungs-Bugs beim Testschreiben gefunden
+
+Dieselbe Fehlerklasse wie bereits mehrfach in den Schwesterdemos: beim Einfügen neuer
+Tests gingen zwei `def`-Funktionssignaturen verloren, ihr Code hängte sich unbemerkt an
+die vorherige Funktion an. Per `pytest --collect-only` und AST-Funktionszählung
+aufgefallen und behoben - mittlerweile eine Standardprüfung nach größeren
+Testdatei-Änderungen in diesem Projekt.
+
+## Allgemeine Übersichtsprüfung nach dem Kapazitäts-Fix
+
+Auf die Frage "Siehst du noch akute Probleme?" systematisch durch die Bereiche
+gegangen, die zuletzt nicht im direkten Fokus standen.
+
+**OR-Tools, die naive Basislinie, PDF-Export, Karte/Animation - alle unauffällig.**
+OR-Tools modelliert Kapazität über `AddDimensionWithVehicleCapacity` als harte
+Nebenbedingung, kann also nie eine kapazitätsverletzte Lösung liefern (das feste
+`"infeasible": False` ist dadurch korrekt, keine Notlösung, die stillschweigend
+Verletzungen zulässt); der Fall "keine Lösung im Zeitlimit gefunden" ist bereits
+mit einer eigenen Fehlermeldung abgefangen. PDF-Export und Karte/Animation berechnen
+Auslastung direkt aus den tatsächlich übergebenen Routen, kein separates Flag, das
+veralten könnte.
+
+**Ein echter, konkreter Fund: Kapazitäts-Warnung folgte nicht dem Iterations-Regler.**
+Jedes Heuristik-Panel hat einen Regler, mit dem man durch die Verbesserungsschritte der
+lokalen Suche blättern kann (0 = direkt nach Konstruktion, Maximum = Endergebnis) - alle
+Kennzahlen (Distanz, Zeitfenster-Verletzungen, angezeigte Karte, exportiertes PDF)
+folgen korrekt dem gewählten Schritt. Die Kapazitäts-Warnung tat das nicht - sie bezog
+sich immer auf das Endergebnis (`history[-1]`), unabhängig vom Regler. Blätterte man zu
+einem früheren, noch kapazitätsverletzten Schritt zurück (z. B. um dort das PDF
+herunterzuladen), erschien trotzdem keine Warnung, obwohl die tatsächlich angezeigte
+und exportierte Route verletzt war. Konkret reproduziert: 12 Stopps, 3 Fahrzeuge,
+Kapazität 25, Zeitfenster an, Seed 7 - Savings ist bei Schritt 0 verletzt, beim
+Endergebnis (Schritt 9) behoben.
+
+Fix: die im Panel angezeigte Warnung folgt jetzt `history[step]` wie alle anderen
+Kennzahlen, mit einem Hinweis, wenn der aktuell angezeigte Schritt nicht der letzte
+ist. Die separat zurückgegebene Zusammenfassung (Vergleichstabelle, Primäransicht-
+Auswahl der "besten" Methode) bleibt bewusst beim Endergebnis - die Regler-Position
+in einem einzelnen Tab ist reiner UI-Zustand dieses Tabs und soll den
+methodenübergreifenden Vergleich nicht verzerren.
+`test_capacity_warning_follows_displayed_step_not_only_final_result`.
+
+**Kleinere Aufräumarbeit:** eine unbenutzte `naive_infeasible`-Variable entfernt (die
+naive Basislinie durchläuft keine lokale Suche, ihr Konstruktions-Status war korrekt,
+wurde aber nirgends angezeigt).
+
+**Ein weiterer versteckter Zusammenführungs-Bug** beim Einfügen des neuen Tests
+gefunden und behoben (identisches Muster wie oben).
+
 ## Benchmark-Ergebnisse (für Website-Texte/Kundengespräche)
 
 Systematischer Test über 15 (bzw. 9 mit Zeitfenstern) zufällige Instanzen, alle fünf
@@ -328,19 +603,27 @@ Methoden mit derselben Bewertungsfunktion verglichen.
 
 | Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
 |---|---|---|---|
-| Sweep | +4,4 % (−4,8 % bis +26,0 %) | ~11 ms | 2 / 15 |
-| Savings | +0,5 % (−5,2 % bis +4,4 %) | ~7 ms | 3 / 15 |
-| Beam Search | +5,5 % (−3,9 % bis +18,7 %) | ~43 ms | 2 / 15 |
-| Genet. Algorithmus | +3,5 % (−3,7 % bis +18,2 %) | ~152 ms | 3 / 15 |
-| OR-Tools | Referenz | ~3 s | 5 / 15 |
+| Sweep | +5,2 % (−0,0 % bis +16,0 %) | ~2 ms | 0 / 15 |
+| Savings | +1,0 % (−3,9 % bis +14,2 %) | ~1 ms | 1 / 15 |
+| Beam Search | +4,5 % (−10,4 % bis +23,7 %) | ~18 ms | 2 / 15 |
+| Genet. Algorithmus | −0,7 % (−9,8 % bis +6,1 %) | ~103 ms | 2 / 15 |
+| OR-Tools | Referenz | ~3 s | 2 / 15 |
+
+(Summe der "Beste Lösung"-Spalte ergibt nicht 15: nach identischer lokaler Suche
+konvergieren mehrere Konstruktionsmethoden bei manchen Instanzen auf exakt dieselbe
+Distanz - Gleichstände zählen für niemanden als Alleinsieg. Neu vermessen nach dem
+Wechsel von beam_search_construction auf monobeam_vrp_construction, siehe eigener
+Abschnitt oben - alle vier eigenen Heuristiken neu gemessen, nicht nur Beam Search,
+damit der Vergleich intern konsistent bleibt.)
 
 Zum Vergleich: Vor Einführung von Or-opt (nur 2-opt) lag Sweep im Schnitt 37 % hinter
 OR-Tools. Or-opt schließt also einen Großteil dieser Lücke, weil schlechte
 Konstruktionsentscheidungen (Stopps beim falschen Fahrzeug) nachträglich korrigiert
 werden können.
 
-**Mit Zeitfenstern** (Summe Verletzungen über 9 Testfälle):
-Sweep 40 · Savings 45 · Beam Search 37 · Genet. Algorithmus 36 · **OR-Tools 54**
+**Mit Zeitfenstern** (Summe Verletzungen über 8 von 9 Testfällen - eine Instanz
+übersprungen, da OR-Tools dort im Zeitlimit keine Lösung fand):
+Sweep 46 · Savings 52 · Beam Search 48 · Genet. Algorithmus 48 · **OR-Tools 51**
 
 ### Zwei Bugs unterwegs gefunden und behoben
 

@@ -17,6 +17,20 @@ def route_cost(route, D):
     return sum(D[nodes[k]][nodes[k + 1]] for k in range(len(nodes) - 1))
 
 
+def route_capacity_excess(route, demands, capacity):
+    """Wie stark eine einzelne Tour die Kapazität überschreitet (0, wenn sie
+    sie einhält). Auf Nutzeranfrage ergänzt: vorher kannte die lokale Suche
+    Kapazität nur als Freigabefilter für Or-opt-Zielrouten, nicht als eigene
+    Optimierungsgröße - siehe find_or_opt_move und local_search_history."""
+    load = sum(demands[s] for s in route)
+    return max(0.0, load - capacity)
+
+
+def solution_capacity_excess(routes, demands, capacity):
+    """Summe der Kapazitätsüberschreitung über alle Fahrzeugtouren."""
+    return sum(route_capacity_excess(r, demands, capacity) for r in routes)
+
+
 def route_timeline(route, D, earliest, latest, service):
     """Simuliert Ankunft/Wartezeit/Start je Stopp entlang einer Tour und
     markiert Zeitfenster-Verletzungen (Ankunft nach dem spätesten Start)."""

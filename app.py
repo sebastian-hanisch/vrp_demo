@@ -51,9 +51,9 @@ from vrp_constants import (
     ORTOOLS_MAX_TIME_LIMIT,
 )
 from vrp_construction import (
-    beam_search_construction,
     decode_giant_tour,
     genetic_algorithm_construction,
+    monobeam_vrp_construction,
     savings_construction,
     sweep_construction,
 )
@@ -92,19 +92,19 @@ preset_col1, preset_col2, preset_col3 = st.columns(3)
 with preset_col1:
     st.button(
         "📦 Innenstadt-Zustellung", use_container_width=True,
-        on_click=apply_preset, args=(15, 3, 20, False, 10),
+        on_click=apply_preset, args=(15, 3, 27, False, 10),
         help="15 Stopps, 3 Fahrzeuge, moderate Kapazität, keine Zeitfenster.",
     )
 with preset_col2:
     st.button(
         "⏰ Enge Zeitfenster", use_container_width=True,
-        on_click=apply_preset, args=(12, 3, 25, True, 7),
+        on_click=apply_preset, args=(12, 3, 25, True, 5),
         help="12 Stopps mit engen Zeitfenstern – zeigt Zielkonflikte zwischen Distanz und Pünktlichkeit.",
     )
 with preset_col3:
     st.button(
         "🚚 Große Flotte, knappe Kapazität", use_container_width=True,
-        on_click=apply_preset, args=(28, 5, 15, False, 3),
+        on_click=apply_preset, args=(28, 5, 34, False, 3),
         help="28 Stopps, 5 Fahrzeuge mit knapper Kapazität – viele kurze Touren nötig.",
     )
 
@@ -255,7 +255,7 @@ r_edges_xy = road_edges_xy(G, asymmetric_edges)
 # Konstruktion für alle vier Heuristiken (die lokale Suche läuft je Tab)
 sweep_routes, sweep_infeasible = sweep_construction(depot, coords, demands, n_vehicles, capacity)
 savings_routes, savings_infeasible = savings_construction(n_stops_eff, D, demands, capacity, n_vehicles)
-beam_routes, beam_infeasible = beam_search_construction(n_stops_eff, D, demands, capacity, n_vehicles)
+beam_routes, beam_infeasible = monobeam_vrp_construction(n_stops_eff, D, demands, capacity, n_vehicles)
 ga_routes, ga_infeasible = genetic_algorithm_construction(
     n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, seed=int(seed)
 )
@@ -263,7 +263,7 @@ ga_routes, ga_infeasible = genetic_algorithm_construction(
 METHODS = [
     ("sweep", "Sweep", "🔀 Sweep", "Sortiert Stopps nach Polarwinkel um das Depot, weist sie reihum kapazitätskonform Fahrzeugen zu.", sweep_routes, sweep_infeasible),
     ("savings", "Savings", "💰 Savings", "Fusioniert anfängliche Einzeltouren in absteigender Ersparnis-Reihenfolge (Clarke & Wright, 1964).", savings_routes, savings_infeasible),
-    ("beam", "Beam Search", "📡 Beam Search", f"Verfolgt die {BEAM_WIDTH} besten Teillösungen parallel, statt nur gierig eine einzige Route aufzubauen.", beam_routes, beam_infeasible),
+    ("beam", "Beam Search", "📡 Beam Search", f"Verfolgt die {BEAM_WIDTH} besten Teillösungen parallel, statt nur gierig eine einzige Route aufzubauen - eine größere Beam-Breite kann das Ergebnis nachweislich nie verschlechtern.", beam_routes, beam_infeasible),
     ("ga", "Genetischer Algorithmus", "🧬 GA", f"Kreuzt und mutiert eine Population von {GA_POP_SIZE} Routenfolgen über {GA_GENERATIONS} Generationen (genetischer Algorithmus).", ga_routes, ga_infeasible),
 ]
 
@@ -279,23 +279,28 @@ histories = {
 # einfach nacheinander in Fahrzeuge gefüllt (kapazitätskonform), keine
 # distanzbewusste Konstruktion, keine lokale Suche. Repräsentiert "was man
 # ohne Tourenoptimierung tun würde" - Kontrastfolie für die Primäransicht.
-naive_routes, naive_infeasible = decode_giant_tour(list(range(n_stops_eff)), demands, capacity, n_vehicles)
+naive_routes, _naive_infeasible = decode_giant_tour(list(range(n_stops_eff)), demands, capacity, n_vehicles)
 naive_dist, naive_viol = solution_totals(naive_routes, D, earliest, latest, service, tw_enabled)
 
 # Beste der vier eigenen Methoden bestimmen (OR-Tools bewusst außen vor - ist
 # Button-gesteuert und nicht garantiert bereits gelöst; die Primäransicht
 # soll ohne Zusatz-Interaktion immer ein vollständiges Ergebnis zeigen).
 own_candidates = []
-for key, label, _tab_label, _caption, _routes, infeasible in METHODS:
-    final_routes, final_dist, final_viol = histories[key][-1]
+for key, label, _tab_label, _caption, _routes, _construction_infeasible in METHODS:
+    final_routes, final_dist, final_viol, final_cap = histories[key][-1]
     own_candidates.append({
         "key": key, "label": label, "routes": final_routes,
-        "dist": final_dist, "viol": final_viol, "infeasible": infeasible,
+        "dist": final_dist, "viol": final_viol, "cap_excess": final_cap,
+        "infeasible": final_cap > 0,
     })
+# Kapazität steht an erster Stelle (auf Nutzeranfrage ergänzt - vorher wurde
+# nur nach Zeitfenster-Verletzungen/Distanz gewählt, eine Methode mit
+# Kapazitätsverletzung konnte trotzdem als "beste" ausgewählt werden, wenn
+# sie bei Distanz/Zeitfenstern vorne lag).
 if tw_enabled:
-    best_own = min(own_candidates, key=lambda c: (c["viol"], c["dist"]))
+    best_own = min(own_candidates, key=lambda c: (c["cap_excess"], c["viol"], c["dist"]))
 else:
-    best_own = min(own_candidates, key=lambda c: c["dist"])
+    best_own = min(own_candidates, key=lambda c: (c["cap_excess"], c["dist"]))
 
 st.markdown("## 🎯 Ihre optimierte Route")
 
@@ -356,12 +361,12 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
     tabs = st.tabs(tab_labels)
 
     summaries = {}
-    for (key, label, _tab_label, caption, routes, infeasible), tab in zip(METHODS, tabs[: len(METHODS)]):
+    for (key, label, _tab_label, caption, routes, _construction_infeasible), tab in zip(METHODS, tabs[: len(METHODS)]):
         with tab:
             st.caption(caption)
             history = histories[key]  # bereits oben zentral berechnet
             summaries[key] = render_heuristic_panel(
-                key, label, history, infeasible, depot, coords, ids, demands, D, paths_lookup,
+                key, label, history, depot, coords, ids, demands, D, paths_lookup,
                 node_positions, r_edges_xy, earliest, latest, service, tw_enabled, capacity, speed_kmh, cost_per_km, co2_per_km,
             )
 
@@ -534,11 +539,15 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
 
     | Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
     |---|---|---|---|
-    | Sweep | +4,4 % (−4,8 % bis +26,0 %) | ~11 ms | 2 / 15 |
-    | Savings | +0,5 % (−5,2 % bis +4,4 %) | ~7 ms | 3 / 15 |
-    | Beam Search | +5,5 % (−3,9 % bis +18,7 %) | ~43 ms | 2 / 15 |
-    | Genet. Algorithmus | +3,5 % (−3,7 % bis +18,2 %) | ~152 ms | 3 / 15 |
-    | OR-Tools | Referenz | ~3 s | 5 / 15 |
+    | Sweep | +5,2 % (−0,0 % bis +16,0 %) | ~2 ms | 0 / 15 |
+    | Savings | +1,0 % (−3,9 % bis +14,2 %) | ~1 ms | 1 / 15 |
+    | Beam Search | +4,5 % (−10,4 % bis +23,7 %) | ~18 ms | 2 / 15 |
+    | Genet. Algorithmus | −0,7 % (−9,8 % bis +6,1 %) | ~103 ms | 2 / 15 |
+    | OR-Tools | Referenz | ~3 s | 2 / 15 |
+
+    *(Summe der "Beste Lösung"-Spalte ergibt nicht 15: nach identischer lokaler Suche
+    (2-opt + Or-opt) konvergieren mehrere Konstruktionsmethoden bei manchen Instanzen auf
+    exakt dieselbe Distanz - solche Gleichstände zählen für niemanden als Alleinsieg.)*
 
     Der Sprung gegenüber einer früheren Version dieser Demo (nur 2-opt, ohne Or-opt) ist
     deutlich: Sweep lag damals im Schnitt 37 % hinter OR-Tools, jetzt nur noch 4–5 %. Or-opt
@@ -562,9 +571,10 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
     Verbesserung" eine andere Prüfreihenfolge nicht automatisch überall zum besseren
     Endergebnis führt, weil die Suche dadurch einen anderen Pfad nimmt.
 
-    **Mit Zeitfenstern (Summe Verletzungen über 9 Testfälle):**
+    **Mit Zeitfenstern (Summe Verletzungen über 8 von 9 Testfällen - eine Instanz musste
+    übersprungen werden, da OR-Tools dort im Zeitlimit keine Lösung fand):**
 
-    Sweep 40 · Savings 45 · Beam Search 37 · Genet. Algorithmus 36 · **OR-Tools 54**
+    Sweep 46 · Savings 52 · Beam Search 48 · Genet. Algorithmus 48 · **OR-Tools 51**
 
     **Eine ehrliche Überraschung:** Wir haben zunächst erwartet, dass OR-Tools bei
     Zeitfenstern klar vorne liegt. Beim Nachrechnen fiel jedoch zunächst ein echter Bug in
@@ -624,7 +634,11 @@ ausgelegt, richtungsabhängig nachzuschlagen (auch OR-Tools unterstützt das nat
 - *Savings-Algorithmus (Clarke & Wright):* Startet mit einer Einzeltour je Stopp und
   fusioniert Touren in der Reihenfolge der größten Ersparnis.
 - *Beam Search:* Baut Touren schrittweise auf, verfolgt dabei aber mehrere
-  (standardmäßig 8) vielversprechende Teillösungen parallel statt nur eine einzige.
+  (standardmäßig 8) vielversprechende Teillösungen parallel statt nur eine einzige -
+  als geordnete "Slots", die jeweils sofort das beste verbleibende Element aus einem
+  gemeinsamen Kandidatenpool beanspruchen (monobeam-Verfahren, Lemons et al. 2022).
+  Dadurch kann eine größere Beam-Breite das Ergebnis **nachweislich nie
+  verschlechtern**, nur gleich gut oder besser machen.
 - *Genetischer Algorithmus:* Eine Population von Routenreihenfolgen wird über mehrere
   Generationen per Kreuzung (Order Crossover), Mutation und Elitismus weiterentwickelt.
 

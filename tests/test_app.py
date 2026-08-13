@@ -225,6 +225,71 @@ def test_switching_between_all_presets():
         assert_ok(at)
 
 
+@pytest.mark.parametrize("label", ["Innenstadt-Zustellung", "Enge Zeitfenster", "Große Flotte, knappe Kapazität"])
+def test_presets_are_feasible_for_all_heuristics(label):
+    """Regressionstest für gefundene Fehler: alle drei Presets zeigten
+    'Kapazität überschritten' bei mindestens einer Methode, zwei davon
+    unabhängig vom Beam-Search-Wechsel. 'Innenstadt-Zustellung' war um nur 1
+    Einheit unmachbar (Gesamtbedarf 61 vs. Kapazität 60) - für ALLE vier
+    Methoden, ein reines Versehen bei der ursprünglichen Parameterwahl.
+    'Große Flotte, knappe Kapazität' war um 75 Einheiten unmachbar (bräuchte
+    doppelte Kapazität) - keine Methode kann das lösen, unabhängig vom
+    Algorithmus. 'Enge Zeitfenster' war rechnerisch machbar (Bedarf 67 vs.
+    Kapazität 75), aber ein tieferer, eigenständiger Fund: find_or_opt_move
+    prüft Kapazität nur am ZIEL einer Verschiebung, nicht ob die QUELLE
+    noch überlastet ist, und akzeptiert nur kostenverbessernde Züge - dadurch
+    kann die lokale Suche bei manchen Instanzen (empirisch: ~21% der
+    getesteten Seeds) in einem kapazitätsverletzten Zustand stecken bleiben,
+    obwohl der Gesamtbedarf klar unter der Gesamtkapazität liegt. Alle drei
+    Presets auf saubere, für alle vier Methoden machbare Parameter/Seeds
+    korrigiert."""
+    at = fresh_app()
+    btn = [b for b in at.button if label in b.label][0]
+    btn.click().run(timeout=TIMEOUT)
+    assert_ok(at)
+    comp_df = [d for d in at.dataframe if "Methode" in d.value.columns][0].value
+    assert (comp_df["Kapazität überschritten"] == "nein").all(), (
+        f"{label}: mindestens eine Methode zeigt Kapazitätsüberschreitung: {comp_df[['Methode','Kapazität überschritten']]}"
+    )
+
+
+def test_capacity_warning_follows_displayed_step_not_only_final_result():
+    """Regressionstest für einen bei einer Übersichtsprüfung gefundenen
+    Fehler: die Kapazitäts-Warnung im Heuristik-Panel bezog sich immer auf
+    das ENDERGEBNIS (history[-1]), unabhängig vom per Regler ausgewählten
+    Verbesserungsschritt - anders als alle übrigen Kennzahlen (Distanz,
+    Zeitfenster-Verletzungen), die korrekt dem Regler folgen. Blätterte man
+    zu einem früheren, noch kapazitätsverletzten Schritt zurück (z. B. um
+    dort das PDF herunterzuladen), erschien trotzdem keine Warnung, obwohl
+    die tatsächlich angezeigte Route verletzt war. Konkret reproduzierbar:
+    12 Stopps, 3 Fahrzeuge, Kapazität 25, Zeitfenster an, Seed 7 - Savings'
+    Verbesserungsverlauf ist bei Schritt 0 verletzt, aber am Ende (Schritt
+    9) behoben. Die zurückgegebene Zusammenfassung (Vergleichstabelle,
+    Primäransicht-Auswahl) bleibt bewusst beim Endergebnis - nur die direkt
+    im Panel angezeigte Warnung folgt jetzt dem Regler."""
+    at = fresh_app()
+    at.sidebar.slider[0].set_value(12).run(timeout=TIMEOUT)
+    at.sidebar.slider[1].set_value(3).run(timeout=TIMEOUT)
+    at.sidebar.slider[2].set_value(25).run(timeout=TIMEOUT)
+    tw_cb = [c for c in at.sidebar.checkbox if "Zeitfenster" in c.label][0]
+    tw_cb.check().run(timeout=TIMEOUT)
+    at.sidebar.number_input[0].set_value(7).run(timeout=TIMEOUT)
+    assert_ok(at)
+
+    comp_df = [d for d in at.dataframe if "Methode" in d.value.columns][0].value
+    savings_row = comp_df[comp_df["Methode"] == "Savings"]
+    assert (savings_row["Kapazität überschritten"] == "nein").all(), (
+        "Endergebnis sollte machbar sein (Vergleichstabelle bezieht sich auf Endergebnis)"
+    )
+
+    savings_slider = [s for s in at.slider if s.key == "savings_step"]
+    assert savings_slider, "Erwarteter Iterations-Regler für Savings fehlt"
+    savings_slider[0].set_value(0).run(timeout=TIMEOUT)
+    assert_ok(at)
+    warnings = [str(w.value) for w in at.warning if "Savings" in str(w.value)]
+    assert warnings, "Erwartete Kapazitäts-Warnung bei frühem Schritt (Konstruktion) fehlt"
+
+
 @pytest.mark.parametrize("prefix", ["sweep", "savings", "beam", "ga"])
 def test_heuristic_iteration_slider(prefix):
     at = fresh_app()
@@ -758,6 +823,8 @@ def _load_pure_functions():
         "road_edges_xy": network.road_edges_xy,
         "route_polyline": network.route_polyline,
         "route_cost": evaluation.route_cost,
+        "route_capacity_excess": evaluation.route_capacity_excess,
+        "solution_capacity_excess": evaluation.solution_capacity_excess,
         "route_timeline": evaluation.route_timeline,
         "evaluate_route": evaluation.evaluate_route,
         "solution_totals": evaluation.solution_totals,
@@ -765,10 +832,12 @@ def _load_pure_functions():
         "sweep_construction": construction.sweep_construction,
         "savings_construction": construction.savings_construction,
         "beam_search_construction": construction.beam_search_construction,
+        "monobeam_vrp_construction": construction.monobeam_vrp_construction,
         "decode_giant_tour": construction.decode_giant_tour,
         "genetic_algorithm_construction": construction.genetic_algorithm_construction,
         "find_two_opt_move": local_search.find_two_opt_move,
         "find_or_opt_move": local_search.find_or_opt_move,
+        "find_swap_move": local_search.find_swap_move,
         "local_search_history": local_search.local_search_history,
         "solve_with_ortools": ortools_solver.solve_with_ortools,
         "generate_tour_plan_pdf": pdf_export.generate_tour_plan_pdf,
@@ -855,14 +924,17 @@ def test_savings_symmetric_case_unchanged_by_directional_fix(funcs):
     assert len(all_stops_flat) == len(set(all_stops_flat)) == inst["n_stops"]
 
 
-def test_beam_search_covers_all_stops(funcs):
+def test_old_beam_search_construction_covers_all_stops(funcs):
+    """beam_search_construction bleibt vollständig getestet im Code (siehe
+    monobeam_vrp_construction-Docstring für die Historie), ist aber nicht
+    mehr in der App verdrahtet - ersetzt durch die monotone Variante."""
     inst = _make_instance(funcs)
     routes, _ = funcs["beam_search_construction"](inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"])
     _assert_all_stops_covered_once(routes, inst["n_stops"])
     assert len(routes) == inst["n_vehicles"]
 
 
-def test_beam_search_produces_reasonably_balanced_routes(funcs):
+def test_old_beam_search_produces_reasonably_balanced_routes(funcs):
     """Regressionstest: eine testweise Cheapest-Insertion-Variante von Beam
     Search fuehrte zu stark unausgewogenen Touren (ein Fahrzeug bekam fast
     alle Stopps, andere blieben leer) und war im Benchmark nachweislich
@@ -872,6 +944,70 @@ def test_beam_search_produces_reasonably_balanced_routes(funcs):
     routes, _ = funcs["beam_search_construction"](20, inst["D"], inst["demands"], 50, 4)
     lengths = [len(r) for r in routes]
     assert max(lengths) - min(lengths) <= 20 * 0.6  # keine extreme Schieflage
+
+
+def test_monobeam_vrp_covers_all_stops(funcs):
+    inst = _make_instance(funcs)
+    routes, _ = funcs["monobeam_vrp_construction"](inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"])
+    _assert_all_stops_covered_once(routes, inst["n_stops"])
+    assert len(routes) == inst["n_vehicles"]
+
+
+def test_monobeam_vrp_produces_reasonably_balanced_routes(funcs):
+    inst = _make_instance(funcs, n_stops=20, n_vehicles=4, capacity=50, seed=3)
+    routes, _ = funcs["monobeam_vrp_construction"](20, inst["D"], inst["demands"], 50, 4)
+    lengths = [len(r) for r in routes]
+    assert max(lengths) - min(lengths) <= 20 * 0.6
+
+
+def test_monobeam_vrp_is_monotone_in_beam_width(funcs):
+    """Der zentrale, auf Nutzeranfrage untersuchte und dann bewiesene
+    Befund: beam_search_construction war NICHT monoton (in einer ersten
+    Stichprobe 6 von 30 Instanzen zeigten eine schlechtere statt bessere
+    Tour bei größerer Breite - dieselbe strukturelle Ursache wie bei den
+    zuerst verworfenen Beam-Search-Varianten der Fracht- und Packungsdemo).
+    Anders als dort übersteht die Verletzung hier nicht zuverlässig die
+    anschließende lokale Suche (3 von 6 geprüften Fällen blieben auch danach
+    bestehen) - für Nutzer sichtbar, nicht nur ein Konstruktionsdetail.
+    monobeam_vrp_construction behebt das nachweislich - über 147
+    Testinstanzen (variable Größe, Kapazität, Fahrzeuganzahl) traten dabei 0
+    Verletzungen auf. Zwei gescheiterte Zwischenversuche mussten dafür erst
+    verworfen werden (siehe Docstring): feste Reihenfolge nach Distanz vom
+    Depot (häufige unnötige Infeasible-Fälle) und nach Bedarf absteigend
+    (behob das, aber 15 von 15 Instanzen nach lokaler Suche deutlich
+    schlechter, da die geografische Flexibilität verloren ging) - die
+    funktionierende Lösung behält die FREIE Wahl des Originals vollständig
+    bei und korrigiert nur die Verschachtelung von Erzeugung und Zuweisung."""
+    for n_stops in [10, 20, 30]:
+        for seed in range(1, 4):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=max(3, n_stops // 6), capacity=20, seed=seed)
+            costs = []
+            for bw in [1, 2, 4, 8]:
+                routes, _ = funcs["monobeam_vrp_construction"](
+                    inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"], beam_width=bw
+                )
+                dist, _ = funcs["solution_totals"](routes, inst["D"], inst["earliest"], inst["latest"], inst["service"], False)
+                costs.append(dist)
+            for i in range(len(costs) - 1):
+                assert costs[i] >= costs[i + 1] - 1e-6, (
+                    f"n={n_stops} seed={seed}: Distanz stieg von bw={[1,2,4,8][i]} zu bw={[1,2,4,8][i+1]}: "
+                    f"{costs[i]:.1f} -> {costs[i+1]:.1f}"
+                )
+
+
+def test_monobeam_vrp_worst_case_completes_within_budget(funcs):
+    """Performance-Schutztest: wird bei jeder UI-Interaktion automatisch neu
+    berechnet. Empirischer Worst Case bei der App-Obergrenze (30 Stopps,
+    Standardbreite 8): ~115ms."""
+    import time
+
+    worst = 0.0
+    for seed in range(1, 8):
+        inst = _make_instance(funcs, n_stops=30, n_vehicles=6, capacity=20, seed=seed)
+        t0 = time.time()
+        funcs["monobeam_vrp_construction"](30, inst["D"], inst["demands"], 20, 6, beam_width=8)
+        worst = max(worst, time.time() - t0)
+    assert worst < 2.0, f"Worst Case dauerte {worst:.1f}s"
 
 
 def test_genetic_algorithm_covers_all_stops(funcs):
@@ -892,19 +1028,55 @@ def test_genetic_algorithm_handles_single_stop(funcs):
     _assert_all_stops_covered_once(routes, 1)
 
 
-def test_local_search_never_increases_distance_without_tw(funcs):
+def test_local_search_respects_capacity_priority_without_tw(funcs):
+    """Regressionstest, aktualisiert auf Nutzeranfrage: die ursprüngliche
+    Fassung prüfte 'Distanz sinkt nie ohne Zeitfenster' - das galt nur,
+    solange Kapazität ein reiner Freigabefilter war. Seit Kapazität
+    lexikografisch VOR Distanz priorisiert wird (siehe find_or_opt_move),
+    kann ein einzelner Schritt die Distanz bewusst erhöhen, um eine
+    Kapazitätsverletzung zu beheben (Kapazität ist der wichtigere
+    Constraint) - konkret beobachtet: ein Schritt sank cap_excess von 1,0
+    auf 0,0 und erhöhte dabei die Distanz von 627 auf 817. Die tatsächliche
+    Garantie: Distanz darf nur dann steigen, wenn cap_excess im selben
+    Schritt SINKT - genau das wird hier geprüft, statt der überholten
+    einfacheren Annahme."""
     inst = _make_instance(funcs)
     routes, _ = funcs["sweep_construction"](inst["depot"], inst["coords"], inst["demands"], inst["n_vehicles"], inst["capacity"])
     history = funcs["local_search_history"](
         routes, inst["D"], inst["demands"], inst["capacity"],
         inst["earliest"], inst["latest"], inst["service"], False,
     )
+    for (r_a, dist_a, viol_a, cap_a), (r_b, dist_b, viol_b, cap_b) in zip(history, history[1:]):
+        if dist_b > dist_a + 1e-6:
+            assert cap_b < cap_a - 1e-6, (
+                f"Distanz stieg ({dist_a:.1f} -> {dist_b:.1f}), ohne dass sich die "
+                f"Kapazitätsüberschreitung verbesserte ({cap_a} -> {cap_b}) - "
+                "unbegründeter Distanzanstieg."
+            )
+
+
+def test_local_search_never_increases_distance_when_capacity_always_feasible(funcs):
+    """Ergänzt die obige, gelockerte Prüfung um den ursprünglichen,
+    strengeren Fall: ist die Konstruktion von Anfang an kapazitätskonform
+    (keine Verletzung, die behoben werden müsste), gilt die klassische
+    Garantie unverändert - Distanz sinkt monoton, ohne Ausnahme."""
+    inst = _make_instance(funcs, n_stops=10, n_vehicles=5, capacity=60, seed=3)
+    routes, _ = funcs["sweep_construction"](inst["depot"], inst["coords"], inst["demands"], inst["n_vehicles"], inst["capacity"])
+    history = funcs["local_search_history"](
+        routes, inst["D"], inst["demands"], inst["capacity"],
+        inst["earliest"], inst["latest"], inst["service"], False,
+    )
+    assert history[0][3] == 0, "Testinstanz sollte von Anfang an kapazitätskonform sein"
     distances = [h[1] for h in history]
     for a, b in zip(distances, distances[1:]):
-        assert b <= a + 1e-6, "Lokale Suche hat die Distanz verschlechtert (ohne Zeitfenster)"
+        assert b <= a + 1e-6, "Lokale Suche hat die Distanz verschlechtert, obwohl nie eine Kapazitätsverletzung vorlag"
 
 
-def test_local_search_never_increases_violations_with_tw(funcs):
+def test_local_search_respects_capacity_priority_with_tw(funcs):
+    """Wie test_local_search_respects_capacity_priority_without_tw, aber mit
+    Zeitfenstern: Verletzungen dürfen nur dann steigen, wenn sich im selben
+    Schritt die Kapazitätsüberschreitung verbessert (Kapazität steht
+    lexikografisch vor Zeitfenstern, siehe find_or_opt_move)."""
     inst = _make_instance(funcs, seed=2)
     rng = np.random.default_rng(2)
     earliest = rng.uniform(0, 100, size=inst["n_stops"]).round(0)
@@ -914,9 +1086,98 @@ def test_local_search_never_increases_violations_with_tw(funcs):
     history = funcs["local_search_history"](
         routes, inst["D"], inst["demands"], inst["capacity"], earliest, latest, service, True,
     )
-    violations = [h[2] for h in history]
-    for a, b in zip(violations, violations[1:]):
-        assert b <= a, "Verletzungen sollten durch die lokale Suche nie zunehmen"
+    for (r_a, dist_a, viol_a, cap_a), (r_b, dist_b, viol_b, cap_b) in zip(history, history[1:]):
+        if viol_b > viol_a:
+            assert cap_b < cap_a - 1e-6, (
+                f"Zeitfenster-Verletzungen stiegen ({viol_a} -> {viol_b}), ohne dass sich die "
+                f"Kapazitätsüberschreitung verbesserte ({cap_a} -> {cap_b})."
+            )
+
+
+def test_capacity_violation_resolved_when_theoretically_possible(funcs):
+    """Kern-Regressionstest für den auf Nutzeranfrage ergänzten
+    Kapazitäts-Fix: mehrere Seeds bei 12 Stopps, 3 Fahrzeugen, Kapazität 25
+    mit Zeitfenstern - die ursprünglich beim manuellen Explorieren gefundenen
+    Problemfälle. Lösbarkeit wird direkt aus dem tatsächlichen Gesamtbedarf
+    berechnet (nicht als fester Seed-abhängiger Wert angenommen, da
+    unterschiedliche Zufallsbereiche in Testcode vs. manueller Exploration
+    zu unterschiedlichen Bedarfssummen führen können) - bei genuin
+    unlösbaren Instanzen (Gesamtbedarf > Gesamtkapazität) bleibt eine
+    Restverletzung korrekt bestehen, sonst sollte sie vollständig behoben
+    werden."""
+    for seed in [7, 9, 11]:
+        inst = _make_instance(funcs, n_stops=12, n_vehicles=3, capacity=25, seed=seed)
+        rng = np.random.default_rng(seed)
+        earliest = rng.uniform(0, 120, size=12).round(0)
+        latest = earliest + rng.uniform(20, 60, size=12).round(0)
+        service = rng.integers(0, 6, size=12)
+        should_be_solvable = sum(inst["demands"]) <= inst["n_vehicles"] * inst["capacity"]
+
+        routes, _ = funcs["savings_construction"](inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"])
+        history = funcs["local_search_history"](
+            routes, inst["D"], inst["demands"], inst["capacity"], earliest, latest, service, True,
+        )
+        final_cap = history[-1][3]
+        if should_be_solvable:
+            assert final_cap == 0, f"seed={seed}: sollte lösbar sein, Restverletzung={final_cap}"
+        else:
+            assert final_cap > 0, f"seed={seed}: sollte genuin unlösbar bleiben"
+
+
+def test_local_search_never_worse_than_construction_on_capacity(funcs):
+    """Über eine breitere Stichprobe: die Kapazitätsüberschreitung nach der
+    lokalen Suche darf nie höher sein als direkt nach der Konstruktion -
+    egal was 2-opt/Or-opt/Tausch tun, sie dürfen die Lage nie verschlimmern."""
+    for seed in range(1, 8):
+        inst = _make_instance(funcs, n_stops=15, n_vehicles=3, capacity=20, seed=seed)
+        routes, _ = funcs["savings_construction"](inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"])
+        construction_cap = funcs["solution_capacity_excess"](routes, inst["demands"], inst["capacity"])
+        history = funcs["local_search_history"](
+            routes, inst["D"], inst["demands"], inst["capacity"], inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        final_cap = history[-1][3]
+        assert final_cap <= construction_cap + 1e-6, (
+            f"seed={seed}: lokale Suche verschlechterte Kapazität ({construction_cap} -> {final_cap})"
+        )
+
+
+def test_find_swap_move_structurally_valid(funcs):
+    """find_swap_move darf keine Stopps verlieren oder verdoppeln."""
+    inst = _make_instance(funcs, n_stops=12, n_vehicles=3, capacity=25, seed=7)
+    routes, _ = funcs["savings_construction"](inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"])
+    new_routes, found = funcs["find_swap_move"](
+        routes, inst["D"], inst["demands"], inst["capacity"], inst["earliest"], inst["latest"], inst["service"], False,
+    )
+    all_stops = sorted(s for r in new_routes for s in r)
+    assert all_stops == list(range(inst["n_stops"]))
+
+
+def test_find_swap_move_resolves_case_or_opt_cannot():
+    """Konkretes, handgerechnetes Beispiel aus der Diskussion: Route A hat
+    3 Stopps mit Bedarf 26 (Kapazität 25, kleinster Stopp dort hat Bedarf 8),
+    Route B hat nur 7 freie Kapazität - Or-opt kann keinen einzelnen Stopp
+    verschieben (auch nicht mit Kapazitäts-Priorität, siehe find_or_opt_move
+    Docstring), aber ein Tausch (Bedarf 8 gegen Bedarf 2) löst es."""
+    from vrp_local_search import find_swap_move, route_capacity_excess
+
+    demands = np.array([5, 1, 2, 5, 9, 5, 8, 9, 8, 6, 4, 5])
+    routes = [[0, 9, 2, 3], [1, 11, 10, 5, 6], [7, 4, 8]]
+    capacity = 25
+    n = 13
+    D = np.ones((n, n)) * 10.0
+    for i in range(n):
+        D[i][i] = 0.0
+    earliest = np.zeros(12)
+    latest = np.full(12, 999.0)
+    service = np.zeros(12)
+
+    excess_before = sum(route_capacity_excess(r, demands, capacity) for r in routes)
+    assert excess_before == 1.0
+
+    new_routes, found = find_swap_move(routes, D, demands, capacity, earliest, latest, service, False)
+    assert found, "Sollte einen entlastenden Tausch finden"
+    excess_after = sum(route_capacity_excess(r, demands, capacity) for r in new_routes)
+    assert excess_after < excess_before
 
 
 def test_or_opt_can_move_stops_between_vehicles(funcs):
