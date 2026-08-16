@@ -547,42 +547,42 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
 
     | Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
     |---|---|---|---|
-    | Sweep | +5,2 % (−0,0 % bis +16,0 %) | ~2 ms | 0 / 15 |
-    | Savings | +1,0 % (−3,9 % bis +14,2 %) | ~1 ms | 1 / 15 |
-    | Beam Search | +4,5 % (−10,4 % bis +23,7 %) | ~18 ms | 2 / 15 |
-    | Genet. Algorithmus | −0,7 % (−9,8 % bis +6,1 %) | ~103 ms | 2 / 15 |
-    | OR-Tools | Referenz | ~3 s | 2 / 15 |
+    | Sweep | +9,5 % (−0,0 % bis +29,1 %) | ~2 ms | 5 / 15 |
+    | Savings | +1,2 % (−0,2 % bis +5,0 %) | ~1 ms | 8 / 15 |
+    | Beam Search | +0,2 % (−0,2 % bis +2,9 %) | ~340 ms | 13 / 15 |
+    | Genet. Algorithmus | +0,3 % (−0,2 % bis +2,9 %) | ~450 ms | 12 / 15 |
+    | OR-Tools | Referenz | ~3 s | 14 / 15 |
 
-    *(Summe der "Beste Lösung"-Spalte ergibt nicht 15: nach identischer lokaler Suche
+    *(Summe der "Beste Lösung"-Spalte übersteigt 15: nach identischer lokaler Suche
     (2-opt + Or-opt) konvergieren mehrere Konstruktionsmethoden bei manchen Instanzen auf
-    exakt dieselbe Distanz - solche Gleichstände zählen für niemanden als Alleinsieg.)*
+    exakt dieselbe Distanz - ein Gleichstand zählt für JEDE beteiligte Methode als "beste
+    Lösung" dieser Instanz, nicht nur für eine.)*
 
-    Der Sprung gegenüber einer früheren Version dieser Demo (nur 2-opt, ohne Or-opt) ist
-    deutlich: Sweep lag damals im Schnitt 37 % hinter OR-Tools, jetzt nur noch 4–5 %. Or-opt
-    schließt also einen Großteil der Lücke, weil schlechte Konstruktionsentscheidungen
-    (Stopps beim falschen Fahrzeug) jetzt nachträglich korrigiert werden können.
+    Der Sprung gegenüber einer sehr frühen Version dieser Demo (nur 2-opt, ohne Or-opt) war
+    deutlich: Sweep lag damals im Schnitt 37 % hinter OR-Tools. Or-opt schließt einen
+    Großteil dieser Lücke, weil schlechte Konstruktionsentscheidungen (Stopps beim falschen
+    Fahrzeug) nachträglich korrigiert werden können - und Beam Search sowie der genetische
+    Algorithmus liegen inzwischen (nach mehreren grundlegenden Überarbeitungen der
+    Konstruktion selbst, siehe README für die vollständige Herleitung) im Schnitt nur noch
+    ~0,2-0,3 % hinter OR-Tools, praktisch gleichauf.
 
-    **Ein Bug in Or-opt selbst, nachträglich gefunden:** Beim finalen Review fiel auf, dass
-    Or-opt beim Wiedereinfügen eines Segments in dieselbe Tour zu viele Positionen als
-    "Ursprungsposition" übersprang (den gesamten Bereich `[start, start+seg_len]` statt nur
-    die eine tatsächliche No-op-Position `start`) – nachrechenbar objektiv falsch. Genauer
+    **Ein Bug in Or-opt selbst, in einer frühen Version nachträglich gefunden:** Or-opt
+    beim Wiedereinfügen eines Segments in dieselbe Tour übersprang zu viele Positionen als
+    "Ursprungsposition" (den gesamten Bereich `[start, start+seg_len]` statt nur die eine
+    tatsächliche No-op-Position `start`) – nachrechenbar objektiv falsch. Genauer
     hingeschaut zeigt sich: Bei einer einzelnen Tour gibt es für die meisten dadurch
     blockierten Zielrouten einen redundanten alternativen Suchpfad (z. B. erreicht
     "verschiebe Stopp i" oft dieselbe Zielroute wie "verschiebe Stopp i+1") – der Bug
-    ändert also nicht unbedingt, WELCHE Zielrouten grundsätzlich erreichbar sind, sondern
+    änderte also nicht unbedingt, WELCHE Zielrouten grundsätzlich erreichbar sind, sondern
     die Reihenfolge, in der Kandidaten geprüft werden. Da die lokale Suche beim ersten
     verbessernden Zug abbricht (First-Improvement), kann eine andere Prüfreihenfolge trotzdem
-    den gesamten weiteren Suchpfad ändern. Nach der Korrektur wurden alle Benchmark-Zahlen
-    neu gemessen: Sweep und der genetische Algorithmus wurden spürbar besser, Savings und
-    Beam Search minimal schwächer im Schnitt, dafür deutlich konsistenter (kleinere
-    Schwankungsbreite). Ein Beispiel dafür, dass bei Local-Search-Verfahren mit "erster
-    Verbesserung" eine andere Prüfreihenfolge nicht automatisch überall zum besseren
-    Endergebnis führt, weil die Suche dadurch einen anderen Pfad nimmt.
+    den gesamten weiteren Suchpfad ändern. Ein Beispiel dafür, dass bei Local-Search-Verfahren
+    mit "erster Verbesserung" eine andere Prüfreihenfolge nicht automatisch überall zum
+    besseren Endergebnis führt, weil die Suche dadurch einen anderen Pfad nimmt.
 
-    **Mit Zeitfenstern (Summe Verletzungen über 8 von 9 Testfällen - eine Instanz musste
-    übersprungen werden, da OR-Tools dort im Zeitlimit keine Lösung fand):**
+    **Mit Zeitfenstern (Summe Verletzungen über 9 von 9 Testfällen):**
 
-    Sweep 46 · Savings 52 · Beam Search 48 · Genet. Algorithmus 48 · **OR-Tools 51**
+    Sweep 30 · Savings 33 · Beam Search 31 · Genet. Algorithmus 27 · **OR-Tools 53**
 
     **Eine ehrliche Überraschung:** Wir haben zunächst erwartet, dass OR-Tools bei
     Zeitfenstern klar vorne liegt. Beim Nachrechnen fiel jedoch zunächst ein echter Bug in
@@ -602,14 +602,17 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
     eng terminierten Instanzen kann dieser einfachere, aber zielgerichtete Ansatz einem
     allgemeinen, distanzfokussierten Solver das Wasser reichen.
 
-    **Fazit:** Es gibt kein universell bestes Verfahren. Savings ist überraschend nah an
-    OR-Tools bei reiner Distanzminimierung (im Schnitt sogar leicht davor) und praktisch
-    kostenlos in der Rechenzeit. Bei Zeitfenstern hängt es stark von der konkreten Instanz
-    ab. OR-Tools bleibt die richtige Wahl, wenn zusätzliche, komplexere Nebenbedingungen
-    (mehrere Depots, Fahrerregeln, Pickup & Delivery) dazukommen, die sich in einer
-    eigenen Heuristik nur mit deutlich mehr Aufwand sauber abbilden ließen. Welches
-    Verfahren sich für ein reales Problem lohnt, hängt von Problemgröße, Zeitbudget und
-    Anforderungen ab – genau diese Abwägung ist Teil einer fundierten Beratung.
+    **Fazit:** Es gibt kein universell bestes Verfahren. Beam Search und der genetische
+    Algorithmus liegen bei reiner Distanzminimierung inzwischen am nächsten an OR-Tools
+    (~0,2-0,3 % im Schnitt), aber mit spürbar mehr Rechenzeit als die deutlich günstigeren
+    Sweep und Savings - Savings allein bleibt mit nur ~1 % Abstand und praktisch
+    kostenloser Rechenzeit eine starke, einfache Wahl, wenn es schnell gehen muss. Bei
+    Zeitfenstern hängt es stark von der konkreten Instanz ab. OR-Tools bleibt die richtige
+    Wahl, wenn zusätzliche, komplexere Nebenbedingungen (mehrere Depots, Fahrerregeln,
+    Pickup & Delivery) dazukommen, die sich in einer eigenen Heuristik nur mit deutlich
+    mehr Aufwand sauber abbilden ließen. Welches Verfahren sich für ein reales Problem
+    lohnt, hängt von Problemgröße, Zeitbudget und Anforderungen ab – genau diese Abwägung
+    ist Teil einer fundierten Beratung.
     """
             )
 
@@ -650,7 +653,7 @@ ausgelegt, richtungsabhängig nachzuschlagen (auch OR-Tools unterstützt das nat
   Element aus einem gemeinsamen Kandidatenpool beanspruchen (monobeam-Verfahren, Lemons
   et al. 2022). Dadurch kann eine größere Beam-Breite das Ergebnis **nachweislich nie
   verschlechtern**, nur gleich gut oder besser machen - und ist im Schnitt nur noch
-  0,4 % hinter OR-Tools (12 von 15 Testfällen mit der besten eigenen Lösung, siehe
+  0,2 % hinter OR-Tools (13 von 15 Testfällen mit der besten eigenen Lösung, siehe
   README).
 - *Genetischer Algorithmus:* Erkundet denselben Entscheidungsraum wie Beam Search
   (Savings-Fusionsreihenfolgen), aber evolutionär statt mit fester Beam-Breite - das
