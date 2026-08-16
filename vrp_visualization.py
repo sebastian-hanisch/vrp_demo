@@ -97,9 +97,10 @@ def interpolate_along_polyline(xs, ys, n_frames):
 
 
 def build_animated_figure(depot, coords, ids, routes_snapshot, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled, capacity=None, n_frames=40):
-    """Baut auf build_figure auf und lässt pro Fahrzeug ein LKW-Symbol die
-    fertige Route entlangfahren (Fortschritt in % der Wegstrecke, synchron über
-    alle Fahrzeuge - sie starten und enden gemeinsam, auch wenn die realen
+    """Baut auf build_figure auf und lässt pro Fahrzeug ein echtes LKW-Emoji
+    (🚚, mit farbigem Hintergrundkreis für die Fahrzeug-Zuordnung) die fertige
+    Route entlangfahren (Fortschritt in % der Wegstrecke, synchron über alle
+    Fahrzeuge - sie starten und enden gemeinsam, auch wenn die realen
     Streckenlängen unterschiedlich sind)."""
     fig = build_figure(depot, coords, ids, routes_snapshot, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled, capacity=capacity)
 
@@ -113,12 +114,30 @@ def build_animated_figure(depot, coords, ids, routes_snapshot, paths_lookup, nod
         polylines[v] = interpolate_along_polyline(xs, ys, n_frames)
 
     colors = [VEHICLE_COLORS[v % len(VEHICLE_COLORS)] for v in active]
+    # Zwei uebereinanderliegende Spuren statt einer: ein farbiger Hintergrundkreis
+    # (haelt die Fahrzeug-Farbcodierung, die die Routenlinien ebenfalls nutzen)
+    # PLUS ein echtes LKW-Emoji als Text-Marker obenauf. Auf Nutzerhinweis
+    # korrigiert - die vorherige Fassung nutzte nur ein einfaches Dreieck-Symbol
+    # (symbol="triangle-right") und einen Trace-internen Namen "🚚", der wegen
+    # showlegend=False/hoverinfo="skip" nirgends sichtbar war - die App-Texte
+    # ("LKW-Animation", "LKW-Symbol") versprachen mehr, als tatsächlich zu sehen
+    # war. Keine Richtungsrotation ging dabei verloren - das Dreieck zeigte
+    # ohnehin immer starr nach rechts, unabhängig von der tatsächlichen
+    # Fahrtrichtung.
+    bg_trace_index = len(fig.data)
+    fig.add_trace(
+        go.Scatter(
+            x=[polylines[v][0][0] for v in active], y=[polylines[v][1][0] for v in active],
+            mode="markers", marker=dict(size=20, color=colors, line=dict(width=2, color="white")),
+            showlegend=False, hoverinfo="skip",
+        )
+    )
     truck_trace_index = len(fig.data)
     fig.add_trace(
         go.Scatter(
             x=[polylines[v][0][0] for v in active], y=[polylines[v][1][0] for v in active],
-            mode="markers", marker=dict(size=16, symbol="triangle-right", color=colors, line=dict(width=2, color="white")),
-            name="🚚", showlegend=False, hoverinfo="skip",
+            mode="text", text=["🚚"] * len(active), textfont=dict(size=15),
+            showlegend=False, hoverinfo="skip",
         )
     )
 
@@ -128,8 +147,11 @@ def build_animated_figure(depot, coords, ids, routes_snapshot, paths_lookup, nod
         fy = [polylines[v][1][f] for v in active]
         frames.append(
             go.Frame(
-                data=[go.Scatter(x=fx, y=fy, mode="markers", marker=dict(size=16, symbol="triangle-right", color=colors, line=dict(width=2, color="white")))],
-                traces=[truck_trace_index], name=str(f),
+                data=[
+                    go.Scatter(x=fx, y=fy, mode="markers", marker=dict(size=20, color=colors, line=dict(width=2, color="white"))),
+                    go.Scatter(x=fx, y=fy, mode="text", text=["🚚"] * len(active), textfont=dict(size=15)),
+                ],
+                traces=[bg_trace_index, truck_trace_index], name=str(f),
             )
         )
     fig.frames = frames

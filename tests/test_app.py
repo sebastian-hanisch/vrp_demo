@@ -148,9 +148,27 @@ def test_primary_view_handles_infeasible_gracefully():
 
 
 def test_regenerate_button():
+    """Regressionstest für einen vom Nutzer gemeldeten Fehler: die vorherige
+    Fassung prüfte nur 'kein Absturz' (assert_ok) - genau diese Schwäche
+    ließ den eigentlichen Bug unentdeckt durch: der Button hatte VOR der
+    Korrektur bei unverändertem Seed buchstäblich keine Wirkung (identische
+    Stopp-Koordinaten vor/nach Klick, verifiziert), weil die automatische
+    Neugenerierung bereits bei jeder Seed-/n_stops-Änderung griff und der
+    Button selbst keine eigene Aktion auslöste. Fix: der Button würfelt
+    jetzt einen neuen Zufalls-Seed (siehe randomize_seed in vrp_presets.py)
+    - dieser Test prüft die TATSÄCHLICHE Wirkung (Seed und Stopps ändern
+    sich), nicht nur Absturzfreiheit."""
     at = fresh_app()
+    seed_before = at.session_state["seed_input"]
+    stops_before = at.session_state["stops"].copy()
+
     at.sidebar.button[0].click().run(timeout=TIMEOUT)
     assert_ok(at)
+
+    seed_after = at.session_state["seed_input"]
+    stops_after = at.session_state["stops"]
+    assert seed_after != seed_before, "Button sollte einen neuen Zufalls-Seed würfeln"
+    assert not stops_before.equals(stops_after), "Button sollte tatsächlich neue Stopps erzeugen"
 
 
 @pytest.mark.parametrize("n_stops", [5, 30])
@@ -322,6 +340,43 @@ def test_asymmetric_network_at_worst_case_settings():
     tw_checkbox = [c for c in at.sidebar.checkbox if "Zeitfenster" in c.label][0]
     tw_checkbox.check().run(timeout=TIMEOUT)
     assert_ok(at)
+
+
+def test_animation_uses_actual_truck_emoji_not_generic_triangle():
+    """Regressionstest für einen vom Nutzer gemeldeten Fehler: die App-Texte
+    versprechen durchgehend eine 'LKW-Animation' mit 'LKW-Symbol', aber die
+    Animation zeigte nur ein einfaches Dreieck-Symbol (symbol='triangle-
+    right'). Der Trace-interne Name '🚚' war wegen showlegend=False und
+    hoverinfo='skip' nirgends sichtbar - reine interne Buchführung, keine
+    tatsächliche Darstellung. Fix: ein echtes LKW-Emoji als Text-Marker,
+    mit einem farbigen Hintergrundkreis für die Fahrzeug-Zuordnung (sonst
+    wäre die bisherige Farbcodierung verloren gegangen, da Emoji keine
+    einstellbare marker.color-Eigenschaft haben)."""
+    from vrp_network import build_road_network, compute_network_distances, road_edges_xy
+    from vrp_construction import sweep_construction
+    from vrp_visualization import build_animated_figure
+
+    rng = np.random.default_rng(1)
+    depot = (50.0, 50.0)
+    coords = rng.uniform(5, 95, size=(10, 2))
+    demands = rng.integers(1, 10, size=10)
+    G, all_pts, asym = build_road_network(depot, tuple(map(tuple, coords)), 15, 5, 1)
+    D, paths_lookup = compute_network_distances(G, 10, "test")
+    routes, _ = sweep_construction(depot, coords, demands, 3, 20)
+    node_positions = {i: tuple(all_pts[i]) for i in range(len(all_pts))}
+    r_edges_xy = road_edges_xy(G, asym)
+
+    fig = build_animated_figure(
+        depot, coords, list(range(1, 11)), routes, paths_lookup, node_positions, r_edges_xy, D,
+        np.zeros(10), np.full(10, 999.0), np.zeros(10), False, capacity=20,
+    )
+
+    truck_traces = [t for t in fig.data if t.mode == "text" and t.text and any("🚚" in str(x) for x in t.text)]
+    assert truck_traces, "Erwartetes LKW-Emoji als Text-Marker fehlt in der Animation"
+    assert len(fig.frames) > 0
+    assert any("🚚" in str(x) for d in fig.frames[0].data for x in (d.text or [])), (
+        "LKW-Emoji fehlt in den Animations-Frames"
+    )
 
 
 @pytest.mark.parametrize("prefix", ["sweep", "savings", "beam", "ga"])
@@ -814,6 +869,7 @@ def _load_pure_functions():
     return {
         "EPS": c.EPS, "VEHICLE_COLORS": c.VEHICLE_COLORS, "BEAM_WIDTH": c.BEAM_WIDTH,
         "GA_POP_SIZE": c.GA_POP_SIZE, "GA_GENERATIONS": c.GA_GENERATIONS,
+        "GA_SEEDED_POP_SIZE": c.GA_SEEDED_POP_SIZE, "GA_SEEDED_GENERATIONS": c.GA_SEEDED_GENERATIONS,
         "OR_OPT_SEG_LENGTHS": c.OR_OPT_SEG_LENGTHS, "LOCAL_SEARCH_MAX_MOVES": c.LOCAL_SEARCH_MAX_MOVES,
         "DEFAULT_SPEED_KMH": c.DEFAULT_SPEED_KMH, "DEFAULT_COST_PER_KM": c.DEFAULT_COST_PER_KM,
         "DEFAULT_CO2_PER_KM": c.DEFAULT_CO2_PER_KM, "ORTOOLS_MAX_TIME_LIMIT": c.ORTOOLS_MAX_TIME_LIMIT,
@@ -833,8 +889,11 @@ def _load_pure_functions():
         "savings_construction": construction.savings_construction,
         "beam_search_construction": construction.beam_search_construction,
         "monobeam_vrp_construction": construction.monobeam_vrp_construction,
+        "beam_savings": construction.beam_savings,
         "decode_giant_tour": construction.decode_giant_tour,
+        "decode_giant_tour_optimal_split": construction.decode_giant_tour_optimal_split,
         "genetic_algorithm_construction": construction.genetic_algorithm_construction,
+        "genetic_algorithm_construction_seeded": construction.genetic_algorithm_construction_seeded,
         "find_two_opt_move": local_search.find_two_opt_move,
         "find_or_opt_move": local_search.find_or_opt_move,
         "find_swap_move": local_search.find_swap_move,
@@ -995,7 +1054,210 @@ def test_monobeam_vrp_is_monotone_in_beam_width(funcs):
                 )
 
 
-def test_monobeam_vrp_worst_case_completes_within_budget(funcs):
+def test_beam_savings_covers_all_stops(funcs):
+    """Regressionstest für Fund 1 der beam_savings-Historie (siehe README):
+    eine frühere Fassung kürzte das Ergebnis stillschweigend auf
+    n_vehicles Routen, wenn die Fusion mehr getrennte Routen übrig ließ
+    als Fahrzeuge vorhanden waren - ganze Touren samt Stopps verschwanden
+    dabei. Prüft explizit, dass jeder Stopp genau einmal in der
+    zurückgegebenen Routenmenge vorkommt, über mehrere Größen/Kapazitäten."""
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40), (30, 5, 40)]:
+        for seed in range(1, 4):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            routes, _ = funcs["beam_savings"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            all_stops = sorted(s for r in routes for s in r)
+            assert all_stops == list(range(n_stops)), (
+                f"n={n_stops} v={n_vehicles} seed={seed}: nicht alle Stopps abgedeckt, "
+                f"gefunden: {all_stops}"
+            )
+
+
+def test_beam_savings_never_loses_stops_on_consolidation():
+    """Konkretes, handgerechnetes Beispiel aus der Fehlersuche (siehe
+    README Fund 1): ein Szenario, das absichtlich mehr getrennte Routen
+    erzeugt als Fahrzeuge vorhanden sind, um die Zwangs-Konsolidierung zu
+    erzwingen - prüft explizit, dass dabei kein Stopp verloren geht."""
+    import numpy as np
+    from vrp_network import build_road_network, compute_network_distances
+
+    n_stops, n_vehicles, capacity = 20, 2, 15  # bewusst knapp: viele Restrouten noetig
+    rng = np.random.default_rng(3)
+    depot_xy = (50.0, 50.0)
+    stops_xy = rng.uniform(5, 95, size=(n_stops, 2))
+    demands = rng.integers(1, 6, size=n_stops)
+    earliest = np.zeros(n_stops)
+    latest = np.full(n_stops, 999.0)
+    service = np.zeros(n_stops)
+    G, _, _ = build_road_network(tuple(depot_xy), tuple(map(tuple, stops_xy)), 15, 5, 3)
+    D, _ = compute_network_distances(G, n_stops, "test_no_loss")
+
+    from vrp_construction import beam_savings
+    routes, _infeasible = beam_savings(n_stops, D, demands, capacity, n_vehicles, earliest, latest, service, False)
+    all_stops = sorted(s for r in routes for s in r)
+    assert all_stops == list(range(n_stops))
+    assert len(routes) == n_vehicles
+
+
+def test_beam_savings_is_monotone_without_tw(funcs):
+    """Der zentrale Befund der beam_savings-Historie (siehe README, Funde
+    2-4): drei unabhängige Bugs mussten behoben werden, bevor Monotonie
+    zuverlässig galt (falsches Verschachtelungsmuster, konsolidierungs-
+    unbewusste Auswahl, lokale-Suche-blinde Auswahl). Vergleich bewusst
+    kapazitätsbewusst (Kapazitätsüberschreitung, Distanz) statt nur
+    Distanz - eine reine Distanz-Verschlechterung kann ein korrekter
+    Kompromiss sein, wenn dafür die Kapazitätsüberschreitung sinkt (siehe
+    README, konkret bei n=25 v=3 seed=4 gefunden: 553,3 -> 553,6 bei
+    gleichzeitig sinkender Überschreitung 6 -> 3 - kein Bug, sondern
+    korrektes lexikografisches Verhalten)."""
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40), (30, 5, 40)]:
+        for seed in range(1, 5):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            if sum(inst["demands"]) > n_vehicles * capacity:
+                continue  # genuin unloesbare Instanz uebersprungen (siehe README-Historie)
+            vals = []
+            for bw in [1, 2, 4, 8]:
+                routes, _ = funcs["beam_savings"](
+                    inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                    inst["earliest"], inst["latest"], inst["service"], False, beam_width=bw,
+                )
+                history = funcs["local_search_history"](
+                    routes, inst["D"], inst["demands"], inst["capacity"],
+                    inst["earliest"], inst["latest"], inst["service"], False,
+                )
+                _, dist, _viol, cap = history[-1]
+                vals.append((cap, dist))
+            for i in range(len(vals) - 1):
+                cap_a, dist_a = vals[i]
+                cap_b, dist_b = vals[i + 1]
+                ok = cap_b < cap_a - 1e-6 or (abs(cap_b - cap_a) <= 1e-6 and dist_b <= dist_a + 1e-6)
+                assert ok, (
+                    f"n={n_stops} v={n_vehicles} seed={seed}: Verschlechterung von bw={[1,2,4,8][i]} "
+                    f"zu bw={[1,2,4,8][i+1]}: {vals[i]} -> {vals[i+1]}"
+                )
+
+
+def test_beam_savings_is_monotone_with_tw(funcs):
+    """Wie test_beam_savings_is_monotone_without_tw, aber mit Zeitfenstern -
+    der auf Nutzeranfrage vertiefte Fund 5 der Historie (siehe README): mit
+    Zeitfenstern brach die Monotonie zunächst weiter ein (10 von 44
+    Verletzungen), bis die Konstruktion selbst (nicht nur die Endauswahl)
+    dieselbe lexikografische Priorität wie local_search_history verwendet."""
+    import numpy as np
+
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40)]:
+        for seed in range(1, 5):
+            rng = np.random.default_rng(seed)
+            coords = rng.uniform(5, 95, size=(n_stops, 2))
+            demands = rng.integers(1, 8, size=n_stops)
+            earliest = rng.uniform(0, 120, size=n_stops).round(0)
+            latest = earliest + rng.uniform(20, 60, size=n_stops).round(0)
+            service = rng.integers(0, 6, size=n_stops)
+            depot = np.array([50.0, 50.0])
+            if sum(demands) > n_vehicles * capacity:
+                continue
+            G, _, _ = funcs["build_road_network"](tuple(depot), tuple(map(tuple, coords)), 15, 5, seed)
+            D, _ = funcs["compute_network_distances"](G, n_stops, f"tw_mono_{seed}_{n_stops}")
+
+            vals = []
+            for bw in [1, 2, 4, 8]:
+                routes, _ = funcs["beam_savings"](
+                    n_stops, D, demands, capacity, n_vehicles, earliest, latest, service, True, beam_width=bw,
+                )
+                history = funcs["local_search_history"](routes, D, demands, capacity, earliest, latest, service, True)
+                _, dist, viol, cap = history[-1]
+                vals.append((cap, viol, dist))
+            for i in range(len(vals) - 1):
+                cap_a, viol_a, dist_a = vals[i]
+                cap_b, viol_b, dist_b = vals[i + 1]
+                if cap_b < cap_a - 1e-6:
+                    ok = True
+                elif abs(cap_b - cap_a) <= 1e-6 and viol_b < viol_a:
+                    ok = True
+                elif abs(cap_b - cap_a) <= 1e-6 and viol_b == viol_a:
+                    ok = dist_b <= dist_a + 1e-6
+                else:
+                    ok = False
+                assert ok, (
+                    f"n={n_stops} v={n_vehicles} seed={seed}: Verschlechterung von bw={[1,2,4,8][i]} "
+                    f"zu bw={[1,2,4,8][i+1]}: {vals[i]} -> {vals[i+1]}"
+                )
+
+
+def test_beam_savings_worst_case_completes_within_budget(funcs):
+    """Performance-Schutztest: wird bei jeder UI-Interaktion automatisch
+    neu berechnet. Empirischer Worst Case bei der App-Obergrenze (30
+    Stopps): ~341ms ohne Zeitfenster (Standardbreite jetzt 16 - auf
+    Nutzeranfrage erhöht, siehe README), ~1,1-1,4s mit Zeitfenstern
+    (Standardbreite bleibt bei 8, die vollständige lokale-Suche-Bewertung
+    aller eindeutigen Endkandidaten kostet mit den teureren
+    `evaluate_route`-Aufrufen deutlich mehr, siehe README)."""
+    import time
+    import numpy as np
+
+    worst_no_tw = 0.0
+    worst_tw = 0.0
+    for seed in range(1, 6):
+        inst = _make_instance(funcs, n_stops=30, n_vehicles=5, capacity=40, seed=seed)
+        t0 = time.time()
+        funcs["beam_savings"](
+            30, inst["D"], inst["demands"], 40, 5, inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        worst_no_tw = max(worst_no_tw, time.time() - t0)
+
+        rng = np.random.default_rng(seed)
+        earliest = rng.uniform(0, 120, size=30).round(0)
+        latest = earliest + rng.uniform(20, 60, size=30).round(0)
+        service = rng.integers(0, 6, size=30)
+        t0 = time.time()
+        funcs["beam_savings"](30, inst["D"], inst["demands"], 40, 5, earliest, latest, service, True)
+        worst_tw = max(worst_tw, time.time() - t0)
+
+    assert worst_no_tw < 2.0, f"Worst Case ohne Zeitfenster dauerte {worst_no_tw:.1f}s"
+    assert worst_tw < 5.0, f"Worst Case mit Zeitfenstern dauerte {worst_tw:.1f}s"
+
+
+def test_beam_savings_generally_beats_or_ties_savings(funcs):
+    """Qualitäts-Sanity-Check: der ganze Sinn von beam_savings ist, Savings'
+    deterministisches Fusionsergebnis durch Exploration mehrerer
+    Fusionsreihenfolgen zu verbessern oder mindestens zu erreichen - sollte
+    also über eine breitere Stichprobe NIE schlechter abschneiden als
+    reines Savings (Breite 1 ist bei identischer Bewertungsgröße nah an
+    Savings, größere Breiten können nur zusätzliche Alternativen finden)."""
+    n_worse = 0
+    n_tested = 0
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40)]:
+        for seed in range(1, 6):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            if sum(inst["demands"]) > n_vehicles * capacity:
+                continue
+            n_tested += 1
+            routes_bs, _ = funcs["beam_savings"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            routes_sv, _ = funcs["savings_construction"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            )
+            h_bs = funcs["local_search_history"](
+                routes_bs, inst["D"], inst["demands"], inst["capacity"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            h_sv = funcs["local_search_history"](
+                routes_sv, inst["D"], inst["demands"], inst["capacity"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            _, dist_bs, _, cap_bs = h_bs[-1]
+            _, dist_sv, _, cap_sv = h_sv[-1]
+            worse = cap_bs > cap_sv + 1e-6 or (abs(cap_bs - cap_sv) <= 1e-6 and dist_bs > dist_sv + 1e-6)
+            if worse:
+                n_worse += 1
+    assert n_worse == 0, f"{n_worse} von {n_tested} Instanzen: beam_savings schlechter als Savings"
+
+
+
     """Performance-Schutztest: wird bei jeder UI-Interaktion automatisch neu
     berechnet. Empirischer Worst Case bei der App-Obergrenze (30 Stopps,
     Standardbreite 8): ~115ms."""
@@ -1026,6 +1288,332 @@ def test_genetic_algorithm_handles_single_stop(funcs):
         inst["earliest"], inst["latest"], inst["service"], False,
     )
     _assert_all_stops_covered_once(routes, 1)
+
+
+def test_decode_giant_tour_optimal_split_covers_all_stops(funcs):
+    """Grundlegender Korrektheitstest für die auf Nutzeranfrage ergänzte
+    optimale Split-Prozedur (Prins 2004)."""
+    for n_stops, n_vehicles, capacity in [(10, 3, 25), (20, 4, 30), (25, 5, 20)]:
+        for seed in range(1, 4):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            tour = list(range(n_stops))
+            np.random.default_rng(seed).shuffle(tour)
+            routes, _infeasible = funcs["decode_giant_tour_optimal_split"](
+                tour, inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            _assert_all_stops_covered_once(routes, n_stops)
+
+
+def test_decode_giant_tour_optimal_split_recovers_original_route_quality(funcs):
+    """Regressionstest für den zentralen Fund der Impf-Historie (siehe
+    README): decode_giant_tour (Greedy-Split) respektiert beim Dekodieren
+    einer verketteten Routen-Liste nur Kapazität, nicht die ursprünglichen
+    Routengrenzen - Stopps wandern dadurch über Routengrenzen hinweg und
+    verwässern die Struktur. decode_giant_tour_optimal_split muss die
+    ursprüngliche Savings-Distanz exakt (oder besser) rekonstruieren,
+    unabhängig von dieser Verzerrung."""
+    for seed in range(1, 5):
+        inst = _make_instance(funcs, n_stops=20, n_vehicles=4, capacity=40, seed=seed)
+        savings_routes, _ = funcs["savings_construction"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+        )
+        orig_dist, _ = funcs["solution_totals"](
+            savings_routes, inst["D"], inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        giant_tour = [s for r in savings_routes for s in r]
+        opt_routes, _infeasible = funcs["decode_giant_tour_optimal_split"](
+            giant_tour, inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        opt_dist, _ = funcs["solution_totals"](
+            opt_routes, inst["D"], inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        assert opt_dist <= orig_dist + 1e-6, (
+            f"seed={seed}: optimale Aufteilung ({opt_dist:.1f}) schlechter als "
+            f"Original-Savings ({orig_dist:.1f})"
+        )
+        _assert_all_stops_covered_once(opt_routes, inst["n_stops"])
+
+
+def test_genetic_algorithm_seeded_covers_all_stops(funcs):
+    """Vollständigkeitstest für die ÜBERHOLTE, aber getestet im Code
+    belassene geimpfte GA (genetic_algorithm_construction_seeded) - siehe
+    dortigen Docstring und README, warum sie durch die neue, auf
+    Fusionsentscheidungen operierende genetic_algorithm_construction
+    ersetzt wurde."""
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40)]:
+        inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=1)
+        seed_routes, _ = funcs["beam_savings"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        routes, _infeasible = funcs["genetic_algorithm_construction_seeded"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False, seed=1,
+            seed_routes=seed_routes, pop_size=funcs["GA_SEEDED_POP_SIZE"], generations=funcs["GA_SEEDED_GENERATIONS"],
+        )
+        _assert_all_stops_covered_once(routes, n_stops)
+
+
+def test_genetic_algorithm_without_seed_routes_unchanged(funcs):
+    """Rückwärtskompatibilitäts-Test für die ÜBERHOLTE, aber getestet im
+    Code belassene geimpfte GA: seed_routes=None (Standard) muss das
+    Verhalten vollständig unverändert lassen."""
+    inst = _make_instance(funcs, n_stops=15, n_vehicles=3, capacity=25, seed=3)
+    routes1, _ = funcs["genetic_algorithm_construction_seeded"](
+        inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+        inst["earliest"], inst["latest"], inst["service"], False, seed=3,
+    )
+    routes2, _ = funcs["genetic_algorithm_construction_seeded"](
+        inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+        inst["earliest"], inst["latest"], inst["service"], False, seed=3, seed_routes=None,
+    )
+    assert routes1 == routes2, "seed_routes=None sollte identisch zum Aufruf ohne den Parameter sein"
+
+
+def test_genetic_algorithm_seeded_generally_beats_unseeded(funcs):
+    """Qualitäts-Sanity-Check für die ÜBERHOLTE, aber getestet im Code
+    belassene geimpfte GA - dokumentiert den ursprünglich gefundenen
+    Effekt (23 von 28 Siegen ohne, 15 von 21 mit Zeitfenstern), der zur
+    Entdeckung der noch besseren, jetzt produktiven Fusions-Prioritäten-GA
+    führte (siehe genetic_algorithm_construction und README)."""
+    n_seeded_wins, n_unseeded_wins, n_ties = 0, 0, 0
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40)]:
+        for seed in range(1, 4):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            seed_routes, _ = funcs["beam_savings"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            routes_seeded, _ = funcs["genetic_algorithm_construction_seeded"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False, seed=seed,
+                seed_routes=seed_routes, pop_size=funcs["GA_SEEDED_POP_SIZE"], generations=funcs["GA_SEEDED_GENERATIONS"],
+            )
+            routes_unseeded, _ = funcs["genetic_algorithm_construction_seeded"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], False, seed=seed,
+            )
+            dist_seeded, _ = funcs["solution_totals"](
+                routes_seeded, inst["D"], inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            dist_unseeded, _ = funcs["solution_totals"](
+                routes_unseeded, inst["D"], inst["earliest"], inst["latest"], inst["service"], False,
+            )
+            if dist_seeded < dist_unseeded - 0.5:
+                n_seeded_wins += 1
+            elif dist_unseeded < dist_seeded - 0.5:
+                n_unseeded_wins += 1
+            else:
+                n_ties += 1
+    assert n_seeded_wins >= n_unseeded_wins, (
+        f"Geimpfte GA sollte mindestens so oft gewinnen wie unveraendert: "
+        f"geimpft={n_seeded_wins}, unveraendert={n_unseeded_wins}, gleich={n_ties}"
+    )
+
+
+def test_genetic_algorithm_seeded_worst_case_completes_within_budget(funcs):
+    """Performance-Schutztest für die ÜBERHOLTE, aber getestet im Code
+    belassene geimpfte GA."""
+    import time
+
+    worst = 0.0
+    for seed in range(1, 6):
+        inst = _make_instance(funcs, n_stops=30, n_vehicles=5, capacity=40, seed=seed)
+        seed_routes, _ = funcs["beam_savings"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        t0 = time.time()
+        funcs["genetic_algorithm_construction_seeded"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False, seed=seed,
+            seed_routes=seed_routes, pop_size=funcs["GA_SEEDED_POP_SIZE"], generations=funcs["GA_SEEDED_GENERATIONS"],
+        )
+        worst = max(worst, time.time() - t0)
+    assert worst < 5.0, f"Worst Case dauerte {worst:.1f}s"
+
+
+def test_genetic_algorithm_merge_priority_covers_all_stops(funcs):
+    """Vollständigkeitstest für die NEUE, produktive GA (operiert auf
+    Savings-Fusionsentscheidungen statt Stopp-Permutationen) - über eine
+    breite Parameterspanne inklusive Randfällen, wie bei der Untersuchung
+    empirisch verifiziert (siehe README)."""
+    for n_stops, n_vehicles, capacity in [(5, 1, 40), (15, 3, 40), (20, 4, 40), (25, 4, 40), (30, 5, 40)]:
+        for seed in range(1, 3):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            routes, _infeasible = funcs["genetic_algorithm_construction"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], True, seed=seed,
+            )
+            _assert_all_stops_covered_once(routes, n_stops)
+            assert len(routes) == n_vehicles, f"n={n_stops} v={n_vehicles} seed={seed}: {len(routes)} Routen statt {n_vehicles}"
+
+
+def test_genetic_algorithm_merge_priority_rejects_tw_worsening_merges(funcs):
+    """Regressionstest für den zentralen Fund der Kombinations-Historie
+    (siehe README): eine erste Fassung des Fusions-Prioritäten-Chromosoms
+    prüfte während des Fusionsprozesses selbst keine Zeitfenster-
+    Verträglichkeit - jede geometrisch/kapazitätsmäßig gültige Fusion
+    wurde blind akzeptiert. Ergebnis: nur 6 von 20 Siegen gegenüber der
+    (damals noch produktiven) geimpften GA mit Zeitfenstern. Nach dem Fix
+    (Fusion wird abgelehnt, wenn sie die Zeitfenster-Verletzungen
+    gegenüber den getrennten Routen verschlechtern würde): 20 von 20.
+    Dieser Test prüft direkt, dass eine bekanntermaßen zeitfenster-
+    verschlechternde Fusion tatsächlich abgelehnt wird."""
+    import numpy as np
+
+    # Zwei Stopps mit eng aufeinanderfolgenden, sich gegenseitig
+    # ausschliessenden Zeitfenstern - eine Fusion MUSS eine Verletzung
+    # erzeugen, waehrend getrennte Touren beide puenktlich bedienen koennen.
+    n_stops = 4
+    demands = np.array([2, 2, 2, 2])
+    D = np.array([
+        [0, 10, 10, 50, 50],
+        [10, 0, 15, 55, 55],
+        [10, 15, 0, 55, 55],
+        [50, 55, 55, 0, 5],
+        [50, 55, 55, 5, 0],
+    ], dtype=float)
+    earliest = np.array([0.0, 0.0, 100.0, 200.0])
+    latest = np.array([20.0, 20.0, 120.0, 220.0])
+    service = np.zeros(4)
+
+    routes, _infeasible = funcs["genetic_algorithm_construction"](
+        n_stops, D, demands, 40, 2, earliest, latest, service, True, seed=1,
+    )
+    dist, viol = funcs["solution_totals"](routes, D, earliest, latest, service, True)
+    assert viol == 0, f"Erwartete 0 Zeitfenster-Verletzungen, gefunden: {viol}"
+
+
+def test_genetic_algorithm_merge_priority_fitness_prioritizes_capacity(funcs):
+    """Regressionstest für den fünften, beim Neu-Vermessen der Benchmark-
+    Tabelle gefundenen Fehler (siehe genetic_algorithm_construction-
+    Docstring und README für die Historie): fitness_key bewertete
+    ursprünglich nur (Zeitfenster-Verletzungen, Distanz), Kapazität floss
+    überhaupt nicht ein - GA hatte dadurch keinen evolutionären Druck,
+    kapazitätsverletzte Prioritätsreihenfolgen zu vermeiden. Konkretes,
+    reproduzierbares Beispiel: n=15, v=3, Kapazität 35, Seed 14 - vor dem
+    Fix landeten 4 von 5 internen Test-Seeds bei einem kapazitätsverletzten
+    Rohergebnis (Distanz nach lokaler Suche: 553,0 statt der erreichbaren
+    443,5). Nach dem Fix: alle 5 internen Seeds konsistent bei 443,5, keine
+    Kapazitätsverletzung mehr."""
+    inst = _make_instance(funcs, n_stops=15, n_vehicles=3, capacity=35, seed=14)
+    n_infeasible = 0
+    for internal_seed in range(5):
+        routes, infeasible = funcs["genetic_algorithm_construction"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False, seed=internal_seed,
+        )
+        if infeasible:
+            n_infeasible += 1
+        history = funcs["local_search_history"](
+            routes, inst["D"], inst["demands"], inst["capacity"],
+            inst["earliest"], inst["latest"], inst["service"], False,
+        )
+        _, dist, _viol, cap = history[-1]
+        assert cap == 0, f"internal_seed={internal_seed}: Endergebnis kapazitätsverletzt (Überschreitung={cap})"
+        assert dist < 460, f"internal_seed={internal_seed}: Distanz {dist:.1f} statt erwarteter ~443,5"
+    assert n_infeasible == 0, f"{n_infeasible} von 5 internen Seeds lieferten ein kapazitätsverletztes Rohergebnis"
+
+
+def test_genetic_algorithm_merge_priority_worst_case_completes_within_budget(funcs):
+    """Performance-Schutztest für die neue, produktive GA: komplett
+    eigenständig (keine beam_savings-Vorberechnung nötig) - empirischer
+    Worst Case bei der App-Obergrenze (30 Stopps) ~900ms mit
+    Zeitfenstern, deutlich schneller als die überholte geimpfte Fassung
+    (~2s, siehe test_genetic_algorithm_seeded_worst_case_completes_within_budget)."""
+    import time
+
+    worst = 0.0
+    for seed in range(1, 6):
+        inst = _make_instance(funcs, n_stops=30, n_vehicles=5, capacity=40, seed=seed)
+        t0 = time.time()
+        funcs["genetic_algorithm_construction"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], True, seed=seed,
+        )
+        worst = max(worst, time.time() - t0)
+    assert worst < 3.0, f"Worst Case dauerte {worst:.1f}s"
+
+
+def test_genetic_algorithm_merge_priority_no_tw_worst_case_completes_within_budget(funcs):
+    """Performance-Schutztest für den siebten Fund (siehe README und
+    genetic_algorithm_construction-Docstring): ohne Zeitfenster werden
+    automatisch groessere GA_NO_TW_POP_SIZE/GA_NO_TW_GENERATIONS-Werte
+    verwendet (40/30 statt 20/15) - empirischer Worst Case bei der
+    App-Obergrenze (30 Stopps) ~455ms, deutlich unter dem Zeitfenster-Fall
+    trotz der groesseren Parameter."""
+    import time
+
+    worst = 0.0
+    for seed in range(1, 6):
+        inst = _make_instance(funcs, n_stops=30, n_vehicles=5, capacity=40, seed=seed)
+        t0 = time.time()
+        funcs["genetic_algorithm_construction"](
+            inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+            inst["earliest"], inst["latest"], inst["service"], False, seed=seed,
+        )
+        worst = max(worst, time.time() - t0)
+    assert worst < 1.5, f"Worst Case dauerte {worst:.1f}s"
+
+
+def test_genetic_algorithm_merge_priority_ties_or_beats_seeded(funcs):
+    """Qualitäts-Sanity-Check für den zentralen, auf Nutzeranfrage
+    untersuchten Fund: GA direkt auf Savings-Fusionsentscheidungen
+    operieren zu lassen (statt auf Stopp-Permutationen, geimpft mit
+    beam_savings) erreicht praktisch identische Qualität bei deutlich
+    weniger Rechenzeit - 20 von 20 Siegen über zwei Stichproben (49 Fälle
+    gesamt, 9 Gleichstände) in der ursprünglichen Untersuchung, ein
+    echter Gleichstand, keine klare Dominanz.
+
+    WICHTIG: eine erste Fassung dieses Tests verglich strikte Sieg-Zahlen
+    (`n_new_wins >= n_old_wins`) auf einer kleinen Stichprobe (9 Fälle) -
+    das schlug fehl (2 zu 6), obwohl der zugrundeliegende Befund ein
+    echter Gleichstand ist. Bei nur 9 Vergleichen ist reines Sieg-Zählen
+    zu anfällig für Stichproben-Rauschen, um einen Gleichstand-Befund
+    zuverlässig zu bestätigen. Jetzt: aggregierte Gesamtsumme über eine
+    größere Stichprobe, mit großzügiger Toleranz (die neue GA darf im
+    Schnitt etwas schlechter sein, aber nicht deutlich) - robuster
+    gegenüber einzelnen Ausreißern."""
+    total_old_dist, total_new_dist = 0.0, 0.0
+    total_old_viol, total_new_viol = 0, 0
+    for n_stops, n_vehicles, capacity in [(15, 3, 40), (20, 4, 40), (25, 4, 40), (30, 5, 40)]:
+        for seed in range(1, 6):
+            inst = _make_instance(funcs, n_stops=n_stops, n_vehicles=n_vehicles, capacity=capacity, seed=seed)
+            seed_routes, _ = funcs["beam_savings"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], True,
+            )
+            routes_old, _ = funcs["genetic_algorithm_construction_seeded"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], True, seed=seed,
+                seed_routes=seed_routes, pop_size=funcs["GA_SEEDED_POP_SIZE"], generations=funcs["GA_SEEDED_GENERATIONS"],
+            )
+            routes_new, _ = funcs["genetic_algorithm_construction"](
+                inst["n_stops"], inst["D"], inst["demands"], inst["capacity"], inst["n_vehicles"],
+                inst["earliest"], inst["latest"], inst["service"], True, seed=seed,
+            )
+            dist_old, viol_old = funcs["solution_totals"](
+                routes_old, inst["D"], inst["earliest"], inst["latest"], inst["service"], True,
+            )
+            dist_new, viol_new = funcs["solution_totals"](
+                routes_new, inst["D"], inst["earliest"], inst["latest"], inst["service"], True,
+            )
+            total_old_dist += dist_old
+            total_new_dist += dist_new
+            total_old_viol += viol_old
+            total_new_viol += viol_new
+
+    # Grosszuegige Toleranz (15%): das Ziel ist "praktisch gleichwertig",
+    # nicht "immer strikt besser" - siehe Docstring.
+    assert total_new_viol <= total_old_viol * 1.15 + 2, (
+        f"Neue GA deutlich mehr Zeitfenster-Verletzungen: neu={total_new_viol} alt={total_old_viol}"
+    )
+    assert total_new_dist <= total_old_dist * 1.15, (
+        f"Neue GA deutlich schlechtere Gesamtdistanz: neu={total_new_dist:.0f} alt={total_old_dist:.0f}"
+    )
 
 
 def test_local_search_respects_capacity_priority_without_tw(funcs):

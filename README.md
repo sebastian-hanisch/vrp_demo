@@ -394,6 +394,429 @@ einbezieht.
 Heuristiken, nicht nur Beam Search, damit der Vergleich intern konsistent bleibt) - die
 alten Zahlen bezogen sich auf die nicht-monotone Implementierung.
 
+## Vom Nutzer gemeldet: Beam Search bei größeren Szenarien "ziemlich schlecht"
+
+Direkt nachgeprüft statt vermutet: über mehrere Problemgrößen (10-30 Stopps) gemittelt
+lag `monobeam_vrp_construction` fast durchgehend auf Platz 3 oder 4 von 4 eigenen
+Methoden - **unabhängig von der Beam-Breite** (selbst bei Breite 50, weit über das
+sinnvolle Maß hinaus, blieb eine Lücke von ~14 % zu Savings).
+
+### Die Grundursache: reines Einfügen ist ein bekanntermaßen schwächeres Prinzip
+
+Savings (Clarke & Wright) fusioniert Touren gezielt nach Ersparnis - ein holistisches,
+relatives Kriterium. `monobeam_vrp_construction` baute Touren dagegen schrittweise durch
+"füge den nächsten/günstigsten Stopp bei irgendeinem Fahrzeug hinzu" auf - ein
+myopisches, lokales Kriterium, in der VRP-Literatur bekannt dafür, "Nachzügler"-Stopps
+übrig zu lassen, die am Ende teuer eingesammelt werden müssen. Drei Alternativen für die
+Schritt-Bewertung getestet (reine Inkrementalkosten, Cheapest-Insertion, Regret-
+Einfügung) - keine schloss die Lücke, bestenfalls auf ~5 % verringert.
+
+### Der Durchbruch: Beam Search auf Savings' Fusionsentscheidungen selbst
+
+Statt Beam Search auf Einfüge-Konstruktion anzuwenden, wird es jetzt auf Savings'
+Fusionsreihenfolge angewendet: bei jedem Fusionsschritt wird sowohl "fusionieren" als
+auch "überspringen, für später aufheben" als Kandidat geführt - eine Flexibilität, die
+reines deterministisches Savings nie hat. `beam_savings` in `vrp_construction.py`.
+
+### Vier gefundene und behobene Fehler auf dem Weg zur korrekten Fassung
+
+1. **Datenverlust bei zu vielen Restrouten.** Eine erste Fassung kürzte das Ergebnis
+   einfach auf `n_vehicles` Routen, wenn die Fusion mehr getrennte Routen übrig ließ als
+   Fahrzeuge vorhanden waren - das ließ stillschweigend ganze Touren samt Stopps
+   verschwinden. Verifiziert: in 14 von 14 getesteten Konfigurationen entstanden mehr
+   Routen als Fahrzeuge. Die anfangs vielversprechende Messung (15 % besser als Savings)
+   war dadurch komplett ein Artefakt fehlender Daten, keine echte Verbesserung. Fix:
+   identische Nachbearbeitung wie `savings_construction` - erzwungene Fusion der am
+   wenigsten ausgelasteten Restrouten, bis die Anzahl passt, mit `infeasible`-Markierung
+   statt Datenverlust.
+2. **Falsches Verschachtelungsmuster.** Nach dem Datenverlust-Fix zeigten 13 von 28
+   Testinstanzen nicht-monotones Verhalten - dieselbe Ursache, die in diesem Projekt
+   bereits mehrfach identifiziert wurde (Packung, Fracht, ursprüngliches
+   `monobeam_vrp_construction`): alle Beam-Slots wurden zuerst vollständig erweitert,
+   erst danach sequenziell aus dem gemeinsamen Pool beansprucht. Fix: pro Slot sofort
+   nach der eigenen Erweiterung beanspruchen (Lemons et al. 2022), bevor der nächste
+   Slot überhaupt erweitert wird - Verletzungen sanken auf 7 von 28.
+3. **Konsolidierungs-unbewusste Endauswahl.** Per Trace verifiziert, dass die Beam-Slots
+   selbst bereits korrekt monoton waren (identisch zwischen unterschiedlichen Breiten) -
+   die verbleibenden Verletzungen entstanden bei der AUSWAHL des besten Endzustands: sie
+   verglich rohe Kosten VOR der Zwangs-Konsolidierung, aber diese kann je nach Kandidat
+   unterschiedlich teuer ausfallen. Fix: jeder Endkandidat wird jetzt MIT angewandter
+   Konsolidierung bewertet, bevor der beste ausgewählt wird.
+4. **Lokale-Suche-blinde Auswahl.** Mit korrekter Konsolidierung sank die
+   Verletzungsrate auf ~7 % - aber diese Restfälle waren keine Bugs, sondern eine
+   strukturelle Eigenschaft: die anschließende lokale Suche verbessert strukturell
+   unterschiedliche, ähnlich teure Kandidaten unterschiedlich stark, sodass eine reine
+   Rohkosten-Auswahl gelegentlich einen Kandidaten wählte, der zwar minimal günstiger
+   startete, aber nach lokaler Suche schlechter abschnitt. Fix: alle eindeutigen
+   Endkandidaten (Duplikate herausgefiltert) werden selbst mit lokaler Suche bewertet,
+   der tatsächlich beste gewinnt. Ergebnis: **0 von 147 Verletzungen** über eine breite
+   Stichprobe (mehrere Problemgrößen, mehrere Fahrzeugzahlen, mehrere Seeds je
+   Kombination, ausschließlich tatsächlich lösbare Instanzen).
+
+### Ein fünfter Fund: korrekt monoton, aber bei Zeitfenstern qualitativ schwach
+
+Mit den vier obigen Fixes war die Konstruktion zwar nachweislich monoton, aber bei
+aktivierten Zeitfenstern brach die Qualität stark ein - nur 2 von 10 Siegen gegenüber
+den vier bestehenden Methoden, teils sogar schlechter als das alte
+`monobeam_vrp_construction`. Grund: die Fusionsentscheidungen selbst basierten
+ausschließlich auf Distanz-Ersparnis, ohne jede Rücksicht auf Zeitfenster - das musste
+die lokale Suche allein reparieren, was nicht zuverlässig gelang.
+
+**Fix:** dieselbe lexikografische Priorität (Zeitfenster-Verletzungen, Distanz), die
+lokale Suche selbst verwendet, wird jetzt bereits WÄHREND der Konstruktion auf jede
+Kandidaten-Bewertung angewendet (nicht erst bei der Endauswahl) - jede Bewertung
+während der Fusionssuche nutzt jetzt `evaluate_route` statt nur eine Distanzsumme.
+Ergebnis: 15 von 21 Siegen (71 %) mit Zeitfenstern, 14 von 21 (67 %) ohne, über eine
+breite Stichprobe (mehrere Problemgrößen, mehrere Seeds je Größe) - Monotonie bleibt
+dabei erhalten (0 von 44 Verletzungen mit Zeitfenstern).
+
+### Performance-Kompromiss: von 172ms auf ~1,1-1,4s mit Zeitfenstern
+
+Die vollständige lokale-Suche-Bewertung aller eindeutigen Endkandidaten (Fund 4) kostet
+Rechenzeit - bei 30 Stopps ohne Zeitfenster 172ms Worst Case (kaum langsamer als vorher),
+mit Zeitfenstern (teurere `evaluate_route`-Aufrufe je Kandidat) 1,1-1,4s Worst Case. Eine
+Duplikat-Filterung (identische Routenmengen aus unterschiedlichen Konstruktionspfaden
+nur einmal bewerten) reduzierte das von anfänglich 1,47s auf diesen Wert, ohne
+Korrektheit zu verlieren. Getestete Alternative (günstige `solution_totals`-Vorauswahl
+statt vollständiger lokaler Suche auf allen Kandidaten) war zwar deutlich schneller
+(133ms), brach die Monotonie aber massiv (18 von 44 Verletzungen) - rohe Zeitfenster-
+Verletzungen VOR lokaler Suche korrelieren offenbar schlecht mit dem Ergebnis NACH
+lokaler Suche, anders als Distanz. Korrektheit hat Vorrang vor dieser speziellen
+Optimierung - verworfen.
+
+### Ergebnis in der finalen Benchmark-Tabelle unten
+
+`monobeam_vrp_construction` bleibt vollständig im Code (getestet, aber nicht mehr an die
+Oberfläche angebunden) - dieselbe "getestet, aber ersetzt" Konvention wie bei
+`beam_search_construction` in den Schwesterdemos. Alle vier eigenen Heuristiken für die
+Tabelle unten neu vermessen, nicht nur Beam Search, damit der Vergleich intern
+konsistent bleibt.
+`test_beam_savings_covers_all_stops`, `test_beam_savings_is_monotone_without_tw`,
+`test_beam_savings_is_monotone_with_tw`, `test_beam_savings_never_loses_stops_on_consolidation`,
+`test_beam_savings_worst_case_completes_within_budget`,
+`test_beam_savings_generally_beats_or_ties_savings`.
+
+## Vom Nutzer gefragt: harmoniert Genetischer Algorithmus auch mit der Savings-Idee?
+
+Naheliegende Anschlussfrage nach dem Beam-Search-Durchbruch: Beam Search UND
+Genetischer Algorithmus sind beides Metaheuristiken - hilft dasselbe "Metaheuristik plus
+Savings"-Prinzip auch GA?
+
+### Die Grundidee: Anfangspopulation impfen statt komplett zufällig starten
+
+GAs "Riesentour"-Kodierung startet normalerweise mit einer komplett zufälligen
+Population von Permutationen. Naheliegende, in der GA-Literatur gut etablierte
+Verbesserung: einen Teil der Anfangspopulation stattdessen mit der bereits berechneten
+Savings/beam_savings-Lösung impfen (als Riesentour: Routen einfach aneinandergehängt,
+plus ein paar zufällige Vertauschungen für Diversität).
+
+**Erstes Ergebnis, ohne Zeitfenster: klar positiv.** 23 von 28 Siegen gegenüber
+unveränderter GA, nur 1 Niederlage. **Mit Zeitfenstern: durchwachsen** (9 Siege, 11
+Niederlagen) - die geimpfte GA war dort nicht eindeutig besser.
+
+### Die Ursache: verlustbehaftetes Dekodieren zerstört die geimpfte Struktur
+
+Konkret nachgeprüft: verkettet man Savings-Routen zu einer Riesentour und dekodiert sie
+mit `decode_giant_tour` (striktes Greedy-Split, respektiert nur Kapazität) zurück,
+wandern Stopps über die ursprünglichen Routengrenzen hinweg. Ein Stopp aus Route 2
+landete im Test-Beispiel in Route 1, weil dort noch 3 Einheiten Kapazität frei waren -
+geografisch aber möglicherweise unpassend. Bei Zeitfenstern, wo Stopp-Reihenfolge und
+Fahrzeugzuordnung stark auf Zeitverträglichkeit wirken, verwässerte das die geimpfte
+Qualität besonders stark.
+
+### Der Fix: optimale Split-Prozedur statt striktem Greedy-Split
+
+`decode_giant_tour_optimal_split` in `vrp_construction.py` - ein kürzester-Pfad-Ansatz
+(Prins 2004) über alle möglichen zusammenhängenden Routensegmente der Riesentour, statt
+stur von links nach rechts zu füllen. `dp[i][k]` = minimale Kosten, um die ersten i
+Stopps mit genau k Routen abzudecken - findet die beste Aufteilung unabhängig von der
+Eingabereihenfolge. Verifiziert: die verkettete Savings-Tour wird dadurch wieder exakt
+auf die ursprüngliche Savings-Distanz dekodiert (vorher: verlustbehaftet).
+
+Ergebnis mit Zeitfenstern: **15 von 21 Siegen** (statt 9 von 21).
+`test_decode_giant_tour_optimal_split_covers_all_stops`,
+`test_decode_giant_tour_optimal_split_recovers_original_route_quality`.
+
+### Der Performance-Kompromiss: volle Genauigkeit überall, aber weniger Generationen
+
+Die optimale Dekodierung kostet spürbar mehr Rechenzeit (0,5-0,6ms statt Bruchteile
+einer Millisekunde je Aufruf). Bei den ~2000 Bewertungen einer vollen GA-Runde
+(Standardbreite `pop_size=30`, `generations=40`) summierte sich das auf **~1,9s statt
+~264ms** GA-Anteil bei Zeitfenstern - spürbar langsamer.
+
+Ein erster Kompromissversuch (teure optimale Dekodierung nur an wenigen kritischen
+Stellen: Seed-Anfangsbewertung, einmal je Generation für den generationsbesten
+Kandidaten) war zwar deutlich schneller (~283ms), aber qualitativ schwächer (12 statt
+15 von 21 Siegen) - auch eine Verstärkung auf die Top-3 statt nur den einen Besten je
+Generation half kaum (355ms, weiterhin 12/21). Die Selektionsdruck-Schleife (Turnier-
+auswahl, Crossover, Mutation) "wusste" ohne durchgängig korrekte Bewertung nicht
+zuverlässig genug, welche Kandidaten wirklich gut waren.
+
+**Die tatsächlich beste Lösung:** volle optimale Dekodierung überall (keine
+Kompromisse an der Genauigkeit), aber deutlich reduzierte Populationsgröße und
+Generationenzahl (`GA_SEEDED_POP_SIZE=20`, `GA_SEEDED_GENERATIONS=15` statt der
+Standardwerte 30/40) - der Seed gibt bereits einen starken Ausgangspunkt, weniger
+Generationen genügen zum Verfeinern. Ergebnis: sowohl **schneller** (~377-458ms
+GA-Anteil) **als auch qualitativ besser** (23/28 ohne, 15/21 mit Zeitfenstern) als der
+Kompromiss-Ansatz.
+
+### Architektur: Seed wird wiederverwendet statt doppelt berechnet
+
+`beam_savings` selbst kostet ~1,5s (mit Zeitfenstern, 30 Stopps) - würde GA seinen
+eigenen `beam_savings`-Aufruf für den Seed durchführen, entstünde diese Kostenzeile
+DOPPELT (einmal für den Beam-Search-Tab, einmal intern in GA). Stattdessen nimmt
+`genetic_algorithm_construction` jetzt einen optionalen `seed_routes`-Parameter
+entgegen, und `app.py` reicht das ohnehin schon berechnete `beam_routes` direkt weiter -
+keine redundante Berechnung.
+
+`seed_routes=None` (Standardwert) bewahrt das bisherige Verhalten vollständig -
+Rückwärtskompatibilität für bestehenden Code, der ohne den neuen Parameter aufruft,
+verifiziert per Determinismus-Test (`test_genetic_algorithm_without_seed_routes_unchanged`).
+
+### Gesamtergebnis: alle vier Methoden zusammen weiterhin im vertretbaren Rahmen
+
+Worst Case bei 30 Stopps mit Zeitfenstern, alle vier Methoden zusammen: **~2,78s** -
+vergleichbar mit dem Stand vor der Beam-Savings-Integration, trotz zweier substanzieller
+Algorithmus-Verbesserungen seitdem.
+
+**Diese Impf-Lösung wurde seitdem durch einen noch besseren Ansatz ersetzt** (siehe
+nächster Abschnitt) - hier als `genetic_algorithm_construction_seeded` vollständig im
+Code belassen (getestet, aber nicht mehr angebunden - dieselbe Konvention wie bei
+`monobeam_vrp_construction`).
+`test_genetic_algorithm_seeded_covers_all_stops`,
+`test_genetic_algorithm_seeded_generally_beats_unseeded`,
+`test_genetic_algorithm_seeded_worst_case_completes_within_budget`.
+
+## Auf einer generelleren Ebene: vier Verallgemeinerungen der Kombination untersucht
+
+Direkte Anschlussfrage: die obige Impf-Lösung ist eine SPEZIFISCHE Form der
+Kombination (ein Elite-Individuum + Mutationen als Startpopulation) - könnte "Beam
+Search plus Savings plus GA" auch grundsätzlich anders zusammenspielen? Vier
+verschiedene Verallgemeinerungen systematisch getestet, drei davon verworfen:
+
+1. **Vielfältige Beam-Search-Kandidaten als Startpopulation.** `beam_savings` verwirft
+   intern bereits eine ganze Liste unterschiedlicher Endkandidaten, bevor es sich für
+   den einen besten entscheidet - naheliegend, diese Vielfalt statt Mutationen einer
+   einzelnen Lösung zu nutzen. Verworfen: der interne Beam konvergiert typischerweise
+   auf nur 1-3 tatsächlich unterschiedliche Endkandidaten (Breite 8) - zu wenig
+   Vielfalt für eine ganze Population.
+2. **Routenbewusster Crossover** (ganze Touren zwischen Eltern austauschen, "Route
+   Exchange" - eine in der VRP-GA-Literatur etablierte Technik) statt reinem
+   Permutations-Order-Crossover (OX). Verworfen: kein klarer Vorteil (9 von 15 Siegen
+   für reines OX in direktem Vergleich), meist identische Endwerte - die lokale Suche
+   danach glättet die Unterschiede zwischen den Crossover-Strategien offenbar weitgehend.
+3. **Mehrere Konstruktionsquellen impfen** (Sweep, Savings UND beam_savings statt nur
+   einer) - kostenlos, da alle drei ohnehin schon vorher berechnet werden. Verworfen:
+   praktisch kein Unterschied (26 von 28 Gleichständen) - beam_savings' Ergebnis
+   dominiert die Population ohnehin schnell, die zusätzlichen Quellen tragen kaum
+   etwas bei.
+4. **GA direkt auf Savings-Fusionsentscheidungen operieren lassen**, statt auf Stopp-
+   Permutationen - siehe unten, der Ansatz, der tatsächlich umgesetzt wurde.
+
+### Der erfolgreiche vierte Ansatz: GA erkundet denselben Entscheidungsraum wie Beam Search
+
+Statt GAs Chromosom als Stopp-Permutation zu kodieren (die dann erst noch in Routen
+zerlegt werden muss), ist das Chromosom jetzt direkt eine Permutation der Savings-
+Fusions-PRIORITÄTEN - GA erkundet damit DENSELBEN Entscheidungsraum, den auch
+`beam_savings` durchsucht, aber mit evolutionärer Suche (Population, Crossover,
+Mutation über viele Generationen) statt mit einer festen Beam-Breite. `_decode_merge_priority`
+in `vrp_construction.py`.
+
+**Erstes Ergebnis, ohne Zeitfenster: vielversprechend.** Leicht im Vorteil gegenüber der
+Impf-Lösung UND deutlich schneller (98ms statt mehrerer hundert Millisekunden) - keine
+teure `beam_savings`-Vorberechnung nötig, komplett eigenständig.
+
+**Mit Zeitfenstern: zunächst deutlich schlechter** (6 von 20 Siegen) - dieselbe Lücke,
+die `beam_savings` vor seiner eigenen Zeitfenster-Korrektur hatte: der Fusionsprozess
+selbst prüfte keine Zeitfenster-Verträglichkeit, jede geometrisch/kapazitätsmäßig
+gültige Fusion wurde blind akzeptiert.
+
+**Fix, analog zum beam_savings-Zeitfenster-Fix:** die Fusionsentscheidung selbst prüft
+jetzt, ob eine Fusion die Zeitfenster-Verletzungen gegenüber den getrennten Routen
+verschlechtern würde, und lehnt sie in diesem Fall ab - die GA-evolvierte
+Prioritätsreihenfolge findet dadurch selbstständig zeitfenster-verträgliche Fusionen.
+
+**Ergebnis nach dem Fix, über zwei Stichproben (49 Fälle gesamt):** 20 von 20 Siegen
+gegen die Impf-Lösung (9 Gleichstände) - ein echter Gleichstand in der Qualität, aber
+**mehr als doppelt so schnell** (897ms statt 2067ms bei 30 Stopps mit Zeitfenstern), da
+weder `beam_savings` als Vorberechnung noch die aufwändige optimale Split-Dekodierung
+(`decode_giant_tour_optimal_split`) benötigt werden.
+
+### Umgesetzt: die neue Fusions-Prioritäten-GA ist jetzt die produktive Implementierung
+
+`genetic_algorithm_construction` operiert jetzt auf Fusions-Prioritäten (die alte,
+Stopp-Permutations-basierte Fassung lebt als `genetic_algorithm_construction_seeded`
+weiter, getestet aber nicht mehr angebunden). `app.py` vereinfacht sich dadurch spürbar
+- kein `seed_routes`-Parameter mehr nötig, `beam_savings` wird weiterhin für den
+eigenständigen Beam-Search-Tab berechnet, aber nicht mehr zusätzlich für GA gebraucht.
+
+Robustheit über eine breite Parameterspanne verifiziert (n_stops 5-30, n_vehicles 1-5,
+inklusive Randfällen wie einem einzelnen Fahrzeug) - keine Ausnahmen, stets
+vollständige Stopp-Abdeckung.
+
+**Eine Lehre beim Testschreiben:** ein erster Regressionstest verglich strikte Sieg-
+Zahlen auf einer kleinen Stichprobe (9 Fälle) und schlug fehl (2 zu 6), obwohl der
+zugrundeliegende Befund ein echter Gleichstand ist - bei so wenigen Vergleichen ist
+reines Sieg-Zählen zu anfällig für Stichproben-Rauschen. Auf eine aggregierte
+Gesamtsumme mit großzügiger Toleranz über eine größere Stichprobe umgestellt, robuster
+gegenüber einzelnen Ausreißern.
+
+`test_genetic_algorithm_merge_priority_covers_all_stops`,
+`test_genetic_algorithm_merge_priority_rejects_tw_worsening_merges`,
+`test_genetic_algorithm_merge_priority_worst_case_completes_within_budget`,
+`test_genetic_algorithm_merge_priority_ties_or_beats_seeded`.
+
+### Ein fünfter Fund: Kapazität fehlte komplett in der Fitness-Bewertung
+
+Beim Neu-Vermessen der Benchmark-Tabelle (siehe unten) fiel ein deutlicher Ausreißer
+auf - eine bestimmte Szenario/Seed-Kombination zeigte +26,2 % Abstand zu OR-Tools statt
+der erwarteten ~0,4 %. Untersucht: GAs internes Rohergebnis (VOR lokaler Suche) war
+tatsächlich BESSER als beam_savings (438,7 vs. 441,0) - aber NACH lokaler Suche
+deutlich schlechter (553,0 vs. 441,0), obwohl lokale Suche eigentlich nie
+verschlechtern sollte.
+
+**Ursache:** das Rohergebnis war kapazitätsverletzt (eine Route hatte 39 statt maximal
+35 Einheiten Last) - lokale Suche priorisiert korrekt die Kapazitätsreparatur vor
+Distanz, was hier zusätzliche Distanz kostete (ein bereits an anderer Stelle in diesem
+Projekt etabliertes, korrektes Verhalten - siehe `find_or_opt_move`). Der eigentliche
+Fehler lag tiefer: `fitness_key` bewertete nur `(Zeitfenster-Verletzungen, Distanz)` -
+**Kapazität floss überhaupt nicht in die Bewertung ein**. GA hatte dadurch keinerlei
+evolutionären Druck, kapazitätsverletzte Prioritätsreihenfolgen zu vermeiden - bei
+manchen internen Zufalls-Seeds "gewann" eine raumsparende, aber kapazitätsverletzte
+Fusionsreihenfolge gegenüber einer etwas weniger raumsparenden, aber zulässigen.
+
+**Fix:** `solution_capacity_excess` als ranghöchstes Kriterium ergänzt - `fitness_key`
+liefert jetzt `(Kapazitätsüberschreitung, Zeitfenster-Verletzungen, Distanz)`, dieselbe
+lexikografische Priorität wie überall sonst in dieser Demo (`find_or_opt_move`,
+`beam_savings`). Ergebnis: alle 5 getesteten internen Seeds landen jetzt konsistent bei
+443,5 statt zuvor meist beim kapazitätsverletzten 553,0 - der Ausreißer verschwand
+vollständig, Gesamt-Benchmark verbesserte sich von +2,3 % auf +0,7 % Abstand zu
+OR-Tools.
+
+**Verifiziert, dass die verbleibende Kapazitäts-Anfälligkeit (~9 % der getesteten
+Instanzen mit knapper Fahrzeuganzahl liefern weiterhin ein kapazitätsverletztes
+Rohergebnis) keine GA-spezifische Schwäche ist:** Savings und beam_savings zeigen exakt
+dasselbe Verhalten bei denselben Instanzen - die Zwangs-Konsolidierung (siehe Fund 1
+weiter oben) kann bei zu wenigen Fahrzeugen strukturell nicht immer Kapazität
+einhalten, unabhängig von der Konstruktionsmethode. Lokale Suche repariert das wie bei
+den anderen Methoden auch.
+
+`test_genetic_algorithm_merge_priority_fitness_prioritizes_capacity` - reproduziert
+das konkrete Beispiel (n=15, v=3, Kapazität 35, Seed 14) direkt.
+
+## Rückübertragung: lassen sich die GA-Lehren auf beam_savings anwenden?
+
+Direkte Anschlussfrage nach dem obigen Kapazitäts-Fund: übertragen sich die bei der
+GA-Untersuchung gewonnenen Lehren auch zurück auf `beam_savings`? Zwei Kandidaten
+geprüft:
+
+**1. Kapazitätsblinde Bewertung** (der GA-Hauptfund) - **überträgt sich nicht als
+Problem**. `state_score` (beam_savings' Bewertung während der Beam-Suche selbst)
+berücksichtigt tatsächlich nur `(Zeitfenster-Verletzungen, Distanz)`, keine Kapazität -
+auf den ersten Blick derselbe blinde Fleck wie bei GA. Aber strukturell unproblematisch:
+Fusionen sind während der Beam-Suche hart kapazitätsgesperrt (`apply_merge` lehnt jede
+Fusion ab, die Kapazität überschreiten würde), und beam_savings verfolgt von Anfang an
+mehrere parallele Kandidaten, die am Ende ALLE umfassend mit lokaler Suche verglichen
+werden (kapazitätsbewusst, siehe Fund 4 weiter oben) - genau die Absicherung, die GAs
+Einzel-Linien-Evolution (eine Population mit Elite-Tracking, aber ohne Kapazitäts-
+Priorität in der Fitness) fehlte. Empirisch bestätigt: eine routenanzahl-bewusste
+Test-Bewertung (Anzahl übriger Routen als ranghöchstes Kriterium in `state_score`)
+zeigte keine messbare Verbesserung (31 von 32 Testfällen exakt gleich, gemessen an der
+Rate kapazitätsverletzter Rohergebnisse UND an der Endqualität).
+
+**2. "Steckenbleiben" bei suboptimalen Lösungen** - kein Hinweis gefunden. Auch eine
+8-fache Erhöhung der Beam-Breite (bis 64) half in den meisten Stichprobenfällen nicht
+weiter.
+
+**Aber:** eine größere Beam-Breite zeigte einen echten, wenn auch bescheidenen
+eigenständigen Effekt - 6 von 50 Testfällen (12 %) profitierten von Breite 16 statt 8,
+im Schnitt um 4 % (bei den profitierenden Fällen). Bei doppelten Rechenkosten (~173ms
+auf ~340ms bei 30 Stopps ohne Zeitfenster). Auf Nutzerwunsch umgesetzt: **die
+Standardbreite ist jetzt 16 ohne Zeitfenster** (dort vertretbar, ~341ms Worst Case bei
+30 Stopps), **bleibt aber bei 8 mit Zeitfenstern** (dort bereits ~1,1-1,4s teuer - eine
+Verdopplung wäre für denselben bescheidenen Nutzen nicht gerechtfertigt).
+`BEAM_WIDTH_NO_TW` in `vrp_constants.py`, `beam_savings`' `beam_width`-Parameter
+default jetzt `None` und wird abhängig von `tw_enabled` aufgelöst (explizite
+Überschreibung durch Aufrufer bleibt möglich, z. B. für Tests bei fester Breite).
+
+## Und zurück: profitiert GA auch von einer bedingten Parameterwahl?
+
+Direkte Anschlussfrage nach der beam_savings-Breitenanpassung: derselbe Kostenvergleich
+für GA selbst. Ergebnis: **deutlich stärkerer Effekt als bei beam_savings.**
+
+**Kostenvergleich:** GA kostet ohne Zeitfenster nur ~113ms, mit Zeitfenstern ~1586ms -
+ein 14-facher Unterschied, noch größer als bei beam_savings (dort ~8x). Viel Spielraum
+für eine aufwändigere Suche im günstigeren Fall.
+
+**Getestet:** größere Population/mehr Generationen ohne Zeitfenster, über 50 Testfälle
+(mehrere Problemgrößen, mehrere Fahrzeugzahlen, mehrere Seeds):
+
+| Konfiguration | Verbesserte Fälle | Durchschnittsgewinn (dort) | Rechenzeit (n=30) |
+|---|---|---|---|
+| pop=20, gen=15 (bisheriger Standard) | Basis | – | 113ms |
+| pop=40, gen=30 | 40 % (20/50) | 2,9 % | 455ms |
+| pop=60, gen=40 | 48 % (24/50) | 3,1 % | 888ms |
+
+Zum Vergleich: beam_savings' Breitenerhöhung half nur in 12 % der Fälle, um
+durchschnittlich 4 % - GAs bedingte Parameterwahl hilft in **mehr als dreimal so vielen
+Fällen** (40 % statt 12 %). Nachvollziehbar: eine größere Population/mehr Generationen
+erschließt bei GAs evolutionärer Suche einen größeren Teil des Fusions-Prioritäten-
+Raums, während beam_savings' feste Breite pro Ebene nur die Anzahl paralleler Pfade
+erhöht, ohne die GRUNDSTRUKTUR der Suche zu verändern.
+
+**Umgesetzt (auf Nutzerwunsch: pop=40, gen=30):** `GA_NO_TW_POP_SIZE=40` und
+`GA_NO_TW_GENERATIONS=30` in `vrp_constants.py`, `genetic_algorithm_construction`'s
+`pop_size`/`generations`-Parameter defaulten jetzt auf `None` und werden abhängig von
+`tw_enabled` aufgelöst (analog zu `beam_savings`' `beam_width`) - `GA_SEEDED_POP_SIZE=20`/
+`GA_SEEDED_GENERATIONS=15` bleiben unverändert für den Zeitfenster-Fall. Gesamtzeit
+aller vier Methoden zusammen (ohne Zeitfenster, 30 Stopps): ~814ms - vertretbar, in
+derselben Größenordnung wie eine einzelne Methode mit Zeitfenstern.
+
+`test_genetic_algorithm_merge_priority_no_tw_worst_case_completes_within_budget`.
+
+## Hat GA auch eine Monotonie-Garantie wie beam_savings?
+
+Direkte Anschlussfrage. Ergebnis: **nein, nicht auf dieselbe strukturelle Art** - ein
+wichtiger Unterschied, der zunächst missverstanden und dann korrigiert wurde.
+
+**Was tatsächlich zutrifft:** GAs rohe `fitness_key`-Bewertung IST monoton in
+`generations` (verifiziert: 0 von 50 Verletzungen) - durch Elitismus (der bisher beste
+Kandidat wird nie verworfen) kombiniert mit einer deterministischen Zufallszahlen-
+Sequenz (die ersten N Generationen laufen identisch ab, unabhängig davon, wie viele
+Generationen insgesamt folgen). Mehr Generationen können den intern verfolgten
+Bestwert also nie verschlechtern.
+
+**Was NICHT zutrifft:** in `pop_size` gilt das nicht (22 von 50 Verletzungen, auch auf
+roher Bewertungsebene) - eine größere Population verbraucht die Zufallszahlen-Sequenz
+grundlegend anders (mehr Individuen bei der Initialisierung, andere Turnier-Ziehungen),
+kein "enthält die kleinere Population vollständig"-Verhältnis wie bei beam_savings'
+Breite.
+
+**Und selbst die generations-Monotonie auf Rohebene überträgt sich nicht auf das
+Ergebnis NACH lokaler Suche** (12 % Verletzungen gemessen - dieselbe Klasse von Befund
+wie beam_savings' Fund 4: unterschiedliche Rohkandidaten werden von der lokalen Suche
+unterschiedlich stark verbessert).
+
+**Ein Korrekturversuch wurde begonnen, dann auf Nutzerhinweis korrekt verworfen:**
+periodische Nachprüfung des generationsbesten Kandidaten mit echter lokaler Suche (alle
+5 Generationen plus immer die letzte) eliminierte die Verletzungen in der getesteten
+Stichprobe vollständig (0 von 50) - aber das ist KEINE echte Garantie, sondern ein
+Stichproben-Artefakt: die Prüfpunkte hängen von der genauen Generationenzahl ab (bei
+`generations=13` läge der letzte Prüfpunkt bei Generation 13, bei `generations=10` bei
+Generation 10 - unterschiedliche Prüfpunkte, kein instanzunabhängiger struktureller
+Beweis). Anders als bei beam_savings' Verschachtelungsarchitektur (Lemons et al. 2022),
+die *beweisbar* für jede Breite und jede Instanz gilt, hätte dieser Ansatz nur
+empirisch "meistens funktioniert" - und wurde deshalb nicht in die produktive
+Implementierung übernommen. Zusätzlich kostete er spürbar Rechenzeit (Gesamtzeit aller
+vier Methoden mit Zeitfenstern: ~4,7s statt ~2,8s zuvor).
+
+**Fazit:** GAs "mehr Aufwand hilft tendenziell" (siehe bedingte Parameterwahl oben) ist
+ein empirischer Trend, den echte Testdaten stützen - aber keine mathematische Garantie
+wie bei beam_savings. Dieser Unterschied ist inhärent in der Architektur begründet:
+beam_savings' parallele Kandidatenpfade mit garantierter Verschachtelung sind
+strukturell etwas anderes als GAs einzelne, sich entwickelnde Population mit
+zufallsabhängiger Turnierauswahl.
+
 ## Presets überprüft: drei Funde, nur einer davon mit dem Beam-Search-Wechsel zusammenhängend
 
 Auf Nachfrage systematisch geprüft, ob alle drei Presets bei jeder der vier Heuristiken
@@ -594,6 +1017,49 @@ wurde aber nirgends angezeigt).
 **Ein weiterer versteckter Zusammenführungs-Bug** beim Einfügen des neuen Tests
 gefunden und behoben (identisches Muster wie oben).
 
+## Zwei vom Nutzer gemeldete Probleme: ein wirkungsloser Button und eine leere Beschreibung
+
+### "Neue Stopps generieren" tat bei unverändertem Seed buchstäblich nichts
+
+Direkt verifiziert (Stopp-Koordinaten vor/nach Klick verglichen): identisch. Ursache:
+die automatische Neugenerierung reagiert bereits auf jede Änderung von `n_stops` oder
+`seed` (`gen_key`-Vergleich, siehe weiter oben im Bug-Fund zur Regenerierung). Der
+Button selbst löste zwar `regenerate=True` aus, aber ohne dass sich Seed oder n_stops
+tatsächlich geändert hätten, lieferte derselbe Seed deterministisch dieselben
+Koordinaten - der Button war bei unverändertem Seed ein reiner Leerlauf-Klick.
+
+**Der bestehende Test hatte diese Lücke nicht erkannt:** `test_regenerate_button` prüfte
+nur "kein Absturz" (`assert_ok`), nie die tatsächliche Wirkung - genau die Schwäche, die
+den Bug unentdeckt ließ. Auf echte Wirkungsprüfung umgestellt (Seed UND Stopps müssen
+sich nach dem Klick unterscheiden).
+
+**Fix, kein ersatzloses Entfernen:** statt den nutzlosen Button einfach zu streichen,
+bekam er eine echte Funktion - er würfelt jetzt einen neuen Zufalls-Seed
+(`randomize_seed()` in `vrp_presets.py`, nach demselben `on_click`-Callback-Muster wie
+`apply_preset`). Ein Klick liefert ein komplett neues Szenario, ohne dass man sich
+selbst eine neue Seed-Zahl ausdenken und eintippen muss - praktischer als vorher, nicht
+nur "repariert".
+`test_regenerate_button` (verstärkt).
+
+### "LKW-Animation" zeigte kein LKW-Symbol, sondern ein schlichtes Dreieck
+
+App-Texte und README versprechen durchgehend eine "LKW-Animation" mit "LKW-Symbol" -
+tatsächlich gerendert wurde `symbol="triangle-right"`, ein einfaches Dreieck ohne jeden
+Fahrzeugbezug. Der Trace-interne Name `"🚚"` existierte zwar im Code, war aber wegen
+`showlegend=False` und `hoverinfo="skip"` nirgends sichtbar - reine interne
+Buchführung, keine tatsächliche Darstellung.
+
+**Fix:** ein echtes LKW-Emoji (🚚) als Text-Marker, der die Route entlangfährt - erfüllt
+die Beschreibung jetzt tatsächlich, statt sie nur abzuschwächen. Da Emoji keine
+einstellbare `marker.color`-Eigenschaft haben, wäre dabei die bisherige
+Fahrzeug-Farbcodierung verloren gegangen (jedes Fahrzeug hat eine eigene Farbe, auch
+bei den Routenlinien) - gelöst durch zwei übereinanderliegende Spuren: ein farbiger
+Hintergrundkreis (behält die Farbcodierung) plus das LKW-Emoji obenauf. Keine
+Richtungsinformation ging dabei verloren - das vorherige Dreieck zeigte ohnehin immer
+starr nach rechts, unabhängig von der tatsächlichen Fahrtrichtung, es gab also nie eine
+echte Rotationslogik zu erhalten.
+`test_animation_uses_actual_truck_emoji_not_generic_triangle`.
+
 ## Benchmark-Ergebnisse (für Website-Texte/Kundengespräche)
 
 Systematischer Test über 15 (bzw. 9 mit Zeitfenstern) zufällige Instanzen, alle fünf
@@ -603,27 +1069,31 @@ Methoden mit derselben Bewertungsfunktion verglichen.
 
 | Methode | Ø Abstand zu OR-Tools | Rechenzeit | Beste Lösung |
 |---|---|---|---|
-| Sweep | +5,2 % (−0,0 % bis +16,0 %) | ~2 ms | 0 / 15 |
-| Savings | +1,0 % (−3,9 % bis +14,2 %) | ~1 ms | 1 / 15 |
-| Beam Search | +4,5 % (−10,4 % bis +23,7 %) | ~18 ms | 2 / 15 |
-| Genet. Algorithmus | −0,7 % (−9,8 % bis +6,1 %) | ~103 ms | 2 / 15 |
-| OR-Tools | Referenz | ~3 s | 2 / 15 |
+| Sweep | +9,5 % (−0,0 % bis +29,1 %) | ~2 ms | 5 / 15 |
+| Savings | +1,2 % (−0,2 % bis +5,0 %) | ~1 ms | 8 / 15 |
+| Beam Search | +0,2 % (−0,2 % bis +2,9 %) | ~340 ms | 13 / 15 |
+| Genet. Algorithmus | +0,3 % (−0,2 % bis +2,9 %) | ~450 ms | 12 / 15 |
+| OR-Tools | Referenz | ~3 s | 14 / 15 |
 
-(Summe der "Beste Lösung"-Spalte ergibt nicht 15: nach identischer lokaler Suche
+(Summe der "Beste Lösung"-Spalte übersteigt 15: nach identischer lokaler Suche
 konvergieren mehrere Konstruktionsmethoden bei manchen Instanzen auf exakt dieselbe
-Distanz - Gleichstände zählen für niemanden als Alleinsieg. Neu vermessen nach dem
-Wechsel von beam_search_construction auf monobeam_vrp_construction, siehe eigener
-Abschnitt oben - alle vier eigenen Heuristiken neu gemessen, nicht nur Beam Search,
-damit der Vergleich intern konsistent bleibt.)
+Distanz - ein Gleichstand zählt für JEDE beteiligte Methode als "beste Lösung" dieser
+Instanz, nicht nur für eine. Neu vermessen nach dem
+Wechsel von monobeam_vrp_construction auf beam_savings sowie der Savings-Impfung für GA
+(siehe eigene Abschnitte weiter oben) - alle vier eigenen Heuristiken neu gemessen,
+nicht nur die geänderten, damit der Vergleich intern konsistent bleibt. Kapazität
+bewusst großzügiger gewählt (35 statt 20)
+als in der vorherigen Messung - bei knapperer Kapazität scheiterte OR-Tools bei den
+meisten Zufalls-Seeds an genuiner Unlösbarkeit, nicht an Zeitlimits, was die Stichprobe
+künstlich verkleinert hätte.)
 
 Zum Vergleich: Vor Einführung von Or-opt (nur 2-opt) lag Sweep im Schnitt 37 % hinter
 OR-Tools. Or-opt schließt also einen Großteil dieser Lücke, weil schlechte
 Konstruktionsentscheidungen (Stopps beim falschen Fahrzeug) nachträglich korrigiert
 werden können.
 
-**Mit Zeitfenstern** (Summe Verletzungen über 8 von 9 Testfällen - eine Instanz
-übersprungen, da OR-Tools dort im Zeitlimit keine Lösung fand):
-Sweep 46 · Savings 52 · Beam Search 48 · Genet. Algorithmus 48 · **OR-Tools 51**
+**Mit Zeitfenstern** (Summe Verletzungen über 9 von 9 Testfällen, Kapazität 35 wie oben):
+Sweep 30 · Savings 33 · Beam Search 31 · Genet. Algorithmus **27** · OR-Tools 53
 
 ### Zwei Bugs unterwegs gefunden und behoben
 

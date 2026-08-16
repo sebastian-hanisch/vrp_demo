@@ -45,15 +45,18 @@ import streamlit as st
 
 from vrp_constants import (
     BEAM_WIDTH,
-    GA_GENERATIONS,
-    GA_POP_SIZE,
+    BEAM_WIDTH_NO_TW,
+    GA_NO_TW_GENERATIONS,
+    GA_NO_TW_POP_SIZE,
+    GA_SEEDED_GENERATIONS,
+    GA_SEEDED_POP_SIZE,
     ORTOOLS_COOLDOWN_BUFFER,
     ORTOOLS_MAX_TIME_LIMIT,
 )
 from vrp_construction import (
+    beam_savings,
     decode_giant_tour,
     genetic_algorithm_construction,
-    monobeam_vrp_construction,
     savings_construction,
     sweep_construction,
 )
@@ -68,6 +71,7 @@ from vrp_presets import (
     bounds,
     init_session_state_defaults,
     load_permalink_settings,
+    randomize_seed,
     sync_query_params,
 )
 from vrp_ui_panel import render_heuristic_panel
@@ -157,7 +161,11 @@ with st.sidebar:
         help="Richtwert für einen kleinen/mittleren Diesel-Lieferwagen; je nach Fahrzeugtyp anpassbar.",
     )
 
-    regenerate = st.button("🔄 Neue Stopps generieren", use_container_width=True)
+    st.button(
+        "🎲 Neue Stopps generieren", use_container_width=True, on_click=randomize_seed,
+        help="Würfelt einen neuen Zufalls-Seed und erzeugt damit ein komplett neues Szenario - "
+        "praktisch, ohne selbst eine neue Seed-Zahl eintippen zu müssen.",
+    )
 
 sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled, n_extra, speed_kmh, cost_per_km, co2_per_km)
 
@@ -173,7 +181,7 @@ if "force_regen" not in st.session_state:
 # den RNG-Aufruf direkt unten.)
 gen_key = (n_stops, int(seed))
 needs_init = (
-    "stops" not in st.session_state or regenerate or st.session_state.force_regen
+    "stops" not in st.session_state or st.session_state.force_regen
     or st.session_state.get("gen_key_cache") != gen_key
 )
 if needs_init:
@@ -255,16 +263,16 @@ r_edges_xy = road_edges_xy(G, asymmetric_edges)
 # Konstruktion für alle vier Heuristiken (die lokale Suche läuft je Tab)
 sweep_routes, sweep_infeasible = sweep_construction(depot, coords, demands, n_vehicles, capacity)
 savings_routes, savings_infeasible = savings_construction(n_stops_eff, D, demands, capacity, n_vehicles)
-beam_routes, beam_infeasible = monobeam_vrp_construction(n_stops_eff, D, demands, capacity, n_vehicles)
+beam_routes, beam_infeasible = beam_savings(n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled)
 ga_routes, ga_infeasible = genetic_algorithm_construction(
-    n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, seed=int(seed)
+    n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, seed=int(seed),
 )
 
 METHODS = [
     ("sweep", "Sweep", "🔀 Sweep", "Sortiert Stopps nach Polarwinkel um das Depot, weist sie reihum kapazitätskonform Fahrzeugen zu.", sweep_routes, sweep_infeasible),
     ("savings", "Savings", "💰 Savings", "Fusioniert anfängliche Einzeltouren in absteigender Ersparnis-Reihenfolge (Clarke & Wright, 1964).", savings_routes, savings_infeasible),
-    ("beam", "Beam Search", "📡 Beam Search", f"Verfolgt die {BEAM_WIDTH} besten Teillösungen parallel, statt nur gierig eine einzige Route aufzubauen - eine größere Beam-Breite kann das Ergebnis nachweislich nie verschlechtern.", beam_routes, beam_infeasible),
-    ("ga", "Genetischer Algorithmus", "🧬 GA", f"Kreuzt und mutiert eine Population von {GA_POP_SIZE} Routenfolgen über {GA_GENERATIONS} Generationen (genetischer Algorithmus).", ga_routes, ga_infeasible),
+    ("beam", "Beam Search", "📡 Beam Search", f"Wendet dasselbe Ersparnis-Prinzip wie Savings an, verfolgt aber die {BEAM_WIDTH if tw_enabled else BEAM_WIDTH_NO_TW} besten Fusionsreihenfolgen parallel statt nur eine einzige - eine größere Beam-Breite kann das Ergebnis nachweislich nie verschlechtern.", beam_routes, beam_infeasible),
+    ("ga", "Genetischer Algorithmus", "🧬 GA", f"Erkundet denselben Fusions-Entscheidungsraum wie Beam Search, aber evolutionär über {GA_SEEDED_GENERATIONS if tw_enabled else GA_NO_TW_GENERATIONS} Generationen mit {GA_SEEDED_POP_SIZE if tw_enabled else GA_NO_TW_POP_SIZE} Prioritätsreihenfolgen statt mit fester Beam-Breite - siehe README.", ga_routes, ga_infeasible),
 ]
 
 # Historien einmal zentral berechnen - werden sowohl für die Primäransicht
@@ -633,14 +641,25 @@ ausgelegt, richtungsabhängig nachzuschlagen (auch OR-Tools unterstützt das nat
   Fahrzeugen zugewiesen, solange die Kapazität reicht.
 - *Savings-Algorithmus (Clarke & Wright):* Startet mit einer Einzeltour je Stopp und
   fusioniert Touren in der Reihenfolge der größten Ersparnis.
-- *Beam Search:* Baut Touren schrittweise auf, verfolgt dabei aber mehrere
-  (standardmäßig 8) vielversprechende Teillösungen parallel statt nur eine einzige -
-  als geordnete "Slots", die jeweils sofort das beste verbleibende Element aus einem
-  gemeinsamen Kandidatenpool beanspruchen (monobeam-Verfahren, Lemons et al. 2022).
-  Dadurch kann eine größere Beam-Breite das Ergebnis **nachweislich nie
-  verschlechtern**, nur gleich gut oder besser machen.
-- *Genetischer Algorithmus:* Eine Population von Routenreihenfolgen wird über mehrere
-  Generationen per Kreuzung (Order Crossover), Mutation und Elitismus weiterentwickelt.
+- *Beam Search:* Wendet dasselbe Prinzip wie Savings an (Touren nach Ersparnis
+  fusionieren), verfolgt aber mehrere (16 ohne Zeitfenster, 8 mit Zeitfenstern - eine
+  größere Breite hilft nachweislich, kostet aber Rechenzeit, siehe README)
+  vielversprechende Fusionsreihenfolgen parallel statt nur eine einzige - bei jedem
+  Fusionsschritt wird sowohl "fusionieren" als auch "überspringen, für später aufheben"
+  als Kandidat geführt, als geordnete "Slots", die jeweils sofort das beste verbleibende
+  Element aus einem gemeinsamen Kandidatenpool beanspruchen (monobeam-Verfahren, Lemons
+  et al. 2022). Dadurch kann eine größere Beam-Breite das Ergebnis **nachweislich nie
+  verschlechtern**, nur gleich gut oder besser machen - und ist im Schnitt nur noch
+  0,4 % hinter OR-Tools (12 von 15 Testfällen mit der besten eigenen Lösung, siehe
+  README).
+- *Genetischer Algorithmus:* Erkundet denselben Entscheidungsraum wie Beam Search
+  (Savings-Fusionsreihenfolgen), aber evolutionär statt mit fester Beam-Breite - das
+  Chromosom ist eine Permutation der Fusions-Prioritäten, nicht der Stopp-Reihenfolge.
+  Kreuzung (Order Crossover), Mutation und Elitismus über mehrere Generationen, mit
+  Zeitfenster-Prüfung direkt in der Fusionsentscheidung selbst (eine Fusion wird
+  abgelehnt, wenn sie die Zeitfenster-Verträglichkeit verschlechtern würde). Praktisch
+  gleichwertig zu einer früher getesteten Impf-Variante, aber mehr als doppelt so
+  schnell - siehe README für die vollständige Herleitung.
 
 **Verbesserung – 2-opt + Or-opt Local Search:** 2-opt vertauscht Streckenabschnitte
 *innerhalb* einer Tour. Or-opt geht weiter: es verschiebt kurze Segmente (1–2 Stopps)

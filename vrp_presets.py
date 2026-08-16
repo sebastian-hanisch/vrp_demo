@@ -14,6 +14,7 @@ Spezifikation übereinstimmen.
 """
 
 import math
+import random
 from dataclasses import dataclass
 from typing import Callable, Optional
 
@@ -64,6 +65,24 @@ def apply_preset(n_stops_val, n_vehicles_val, capacity_val, tw_val, seed_val):
     st.session_state["capacity_slider"] = capacity_val
     st.session_state["tw_checkbox"] = tw_val
     st.session_state["seed_input"] = seed_val
+    st.session_state["force_regen"] = True
+
+
+def randomize_seed():
+    """on_click-Callback für den 'Neue Stopps generieren'-Button.
+
+    Auf Nutzerhinweis korrigiert: der Button rief zuvor nur ein normales
+    st.button() ohne eigene Wirkung auf - die Stopp-Neugenerierung geschah
+    bereits automatisch bei jeder Änderung von n_stops oder Seed (siehe
+    gen_key-Vergleich in app.py). Blieb der Seed unverändert, bewirkte ein
+    Klick auf den Button buchstäblich GAR NICHTS (verifiziert: identische
+    Stopp-Koordinaten vor und nach dem Klick), da die zugrundeliegende
+    Zufallserzeugung bei gleichem Seed deterministisch dieselben Werte
+    liefert. Statt den Button ersatzlos zu streichen, bekommt er jetzt eine
+    echte, sinnvolle Funktion: einen neuen, zufälligen Seed würfeln - ein
+    Klick liefert ein komplett neues Szenario, ohne dass man sich selbst
+    eine neue Seed-Zahl ausdenken und eintippen muss."""
+    st.session_state["seed_input"] = random.randint(0, 2_000_000_000)
     st.session_state["force_regen"] = True
 
 
