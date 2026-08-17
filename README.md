@@ -1212,6 +1212,25 @@ jedem Ionos-Tarif zuverlässig, auch mobil, ohne iFrame-Probleme.
 Ein Screenshot der App (z. B. mit dem Kartenausschnitt der berechneten Touren) eignet sich
 gut als Vorschaubild direkt über dem Button.
 
+## Auf Nutzerhinweis behoben: Metrik-Deltas hatten die falsche Farbe
+
+Streamlit färbt `st.metric`-Deltas standardmäßig so, als wäre "höher besser" (positiv=grün,
+negativ=rot) - passend für Kennzahlen wie Umsatz, aber genau falsch herum für Distanz,
+Fahrzeit, Kraftstoffkosten und CO2, wo "weniger besser" ist. Drei Metriken
+("Fahrzeit", "Kraftstoffkosten", "CO2" im Hauptbereich) zeigten Einsparungen
+(negative Deltas wie "-6,7 h ggü. unoptimiert") dadurch fälschlich in ROT an - obwohl
+das ein gutes Ergebnis ist. (Die entsprechenden Metriken im Vergleichs-Tab, `vrp_ui_panel.py`,
+nutzten bereits korrekt `delta_color="inverse"` - nur die drei im Hauptbereich waren
+betroffen.)
+
+**Fix:** `delta_color="inverse"` ergänzt (Streamlits eigene Dokumentation dazu: "useful when
+a negative change is considered good, like a decrease in cost" - exakt unser Fall). Mit
+Regressionstest direkt gegen das Metric-Proto abgesichert, nicht nur gegen den übergebenen
+Parameter (ein Tippfehler im Wert selbst - z. B. `"inverted"` statt `"inverse"` - hätte sonst
+unbemerkt bleiben können).
+
+`test_savings_metrics_use_inverse_delta_color`.
+
 ## 5. Mobile-Hinweis
 
 Layouts wurden für schmale Bildschirme überarbeitet (volle Breite statt verschachtelter

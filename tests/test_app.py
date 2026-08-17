@@ -1958,3 +1958,30 @@ def test_route_cost_symmetric_for_closed_loop(funcs):
     inst = _make_instance(funcs, n_stops=5)
     single = [2]
     assert funcs["route_cost"](single, inst["D"]) == pytest.approx(2 * inst["D"][0][3])
+
+
+def test_savings_metrics_use_inverse_delta_color():
+    """Regressionstest für einen gefundenen UI-Fehler (auf Nutzerhinweis):
+    Streamlit färbt Metrik-Deltas standardmäßig so, als wäre "höher besser"
+    (positiv=grün, negativ=rot) - bei Distanz/Fahrzeit/Kosten/CO2 ist aber
+    "weniger besser". Ohne delta_color="inverse" wurden Einsparungen
+    (negative Deltas wie "-6.7 h ggü. unoptimiert") fälschlich ROT
+    dargestellt, obwohl sie ein gutes Ergebnis anzeigen. Fix: delta_color
+    explizit auf "inverse" gesetzt (Streamlits eigene Doku: "useful when a
+    negative change is considered good, like a decrease in cost"). Prüft
+    direkt gegen das Metric-Proto, dass die Farbe tatsächlich GREEN ist,
+    nicht nur dass delta_color korrekt übergeben wurde (was ein Tippfehler
+    im Wert selbst nicht abgefangen hätte)."""
+    from streamlit.proto.Metric_pb2 import Metric
+
+    at = fresh_app()
+    assert_ok(at)
+    checked = 0
+    for m in at.metric:
+        if m.proto.delta and m.proto.delta.startswith("-"):
+            assert m.proto.color == Metric.MetricColor.GREEN, (
+                f"'{m.proto.label}': negatives Delta ({m.proto.delta!r}) sollte grün sein, "
+                f"ist aber {Metric.MetricColor.Name(m.proto.color)}"
+            )
+            checked += 1
+    assert checked >= 3, f"Erwartete mindestens 3 Metriken mit negativem Delta, gefunden: {checked}"

@@ -327,9 +327,9 @@ if best_own["infeasible"]:
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Distanz", f"{best_own['dist']:.1f} km")
-m2.metric("Fahrzeit", f"{best_hours:.1f} h", delta=f"-{hours_saved:.1f} h ggü. unoptimiert")
-m3.metric("Kraftstoffkosten", f"{best_cost:.0f} €", delta=f"-{cost_saved:.0f} € ggü. unoptimiert")
-m4.metric("CO₂", f"{best_co2:.0f} kg", delta=f"-{co2_saved:.0f} kg ggü. unoptimiert")
+m2.metric("Fahrzeit", f"{best_hours:.1f} h", delta=f"-{hours_saved:.1f} h ggü. unoptimiert", delta_color="inverse")
+m3.metric("Kraftstoffkosten", f"{best_cost:.0f} €", delta=f"-{cost_saved:.0f} € ggü. unoptimiert", delta_color="inverse")
+m4.metric("CO₂", f"{best_co2:.0f} kg", delta=f"-{co2_saved:.0f} kg ggü. unoptimiert", delta_color="inverse")
 
 if tw_enabled:
     st.caption(f"Zeitfenster-Verletzungen: {best_own['viol']} (unoptimiert: {naive_viol})")
