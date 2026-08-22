@@ -12,6 +12,7 @@ import numpy as np
 from vrp_constants import (
     BEAM_WIDTH,
     BEAM_WIDTH_NO_TW,
+    EPS,
     GA_GENERATIONS,
     GA_NO_TW_GENERATIONS,
     GA_NO_TW_POP_SIZE,
@@ -71,8 +72,8 @@ def savings_construction(n_stops, D, demands, capacity, n_vehicles):
     savings_list = []
     for i in range(n_stops):
         for j in range(i + 1, n_stops):
-            s_ij = D[0][i + 1] + D[0][j + 1] - D[i + 1][j + 1]
-            s_ji = D[0][j + 1] + D[0][i + 1] - D[j + 1][i + 1]
+            s_ij = D[i + 1][0] + D[0][j + 1] - D[i + 1][j + 1]
+            s_ji = D[j + 1][0] + D[0][i + 1] - D[j + 1][i + 1]
             savings_list.append((s_ij, i, j))  # Kandidat: Route ...->i->j->...
             savings_list.append((s_ji, j, i))  # Kandidat: Route ...->j->i->...
     savings_list.sort(key=lambda t: -t[0])
@@ -293,8 +294,8 @@ def beam_savings(n_stops, D, demands, capacity, n_vehicles, earliest, latest, se
     savings_list = []
     for i in range(n_stops):
         for j in range(i + 1, n_stops):
-            s_ij = D[0][i + 1] + D[0][j + 1] - D[i + 1][j + 1]
-            s_ji = D[0][j + 1] + D[0][i + 1] - D[j + 1][i + 1]
+            s_ij = D[i + 1][0] + D[0][j + 1] - D[i + 1][j + 1]
+            s_ji = D[j + 1][0] + D[0][i + 1] - D[j + 1][i + 1]
             savings_list.append((s_ij, i, j))
             savings_list.append((s_ji, j, i))
     savings_list.sort(key=lambda t: -t[0])
@@ -613,7 +614,7 @@ def decode_giant_tour_optimal_split(tour, D, demands, capacity, n_vehicles, earl
             if tw_enabled:
                 arrival = (last_dep_time if j > i else 0.0) + (D[node_from][node_to] if j > i else D[0][node_to])
                 start = max(arrival, earliest[s])
-                if start > latest[s]:
+                if start > latest[s] + EPS:
                     seg_viol += 1
                 last_dep_time = start + service[s]
             j += 1
@@ -1025,8 +1026,8 @@ def genetic_algorithm_construction(
     savings_list = []
     for i in range(n_stops):
         for j in range(i + 1, n_stops):
-            s_ij = D[0][i + 1] + D[0][j + 1] - D[i + 1][j + 1]
-            s_ji = D[0][j + 1] + D[0][i + 1] - D[j + 1][i + 1]
+            s_ij = D[i + 1][0] + D[0][j + 1] - D[i + 1][j + 1]
+            s_ji = D[j + 1][0] + D[0][i + 1] - D[j + 1][i + 1]
             savings_list.append((s_ij, i, j))
             savings_list.append((s_ji, j, i))
     m = len(savings_list)

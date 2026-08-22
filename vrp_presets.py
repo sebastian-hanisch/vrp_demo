@@ -48,6 +48,8 @@ SETTING_SPECS = {
     "speed_slider": SettingSpec("speed", int, DEFAULT_SPEED_KMH, 15, 80),
     "cost_slider": SettingSpec("cost", float, DEFAULT_COST_PER_KM, 0.10, 1.00),
     "co2_slider": SettingSpec("co2", float, DEFAULT_CO2_PER_KM, 0.10, 2.00),
+    "depot_x_slider": SettingSpec("depot_x", int, 50, 0, 100),
+    "depot_y_slider": SettingSpec("depot_y", int, 50, 0, 100),
 }
 
 
@@ -131,7 +133,7 @@ def init_session_state_defaults():
             st.session_state[state_key] = spec.default
 
 
-def sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled, n_extra, speed_kmh, cost_per_km, co2_per_km):
+def sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled, n_extra, speed_kmh, cost_per_km, co2_per_km, depot_x, depot_y):
     """Schreibt die aktuelle Konfiguration in die URL zurück, damit die
     Adresszeile jederzeit den aktuellen Stand widerspiegelt und direkt zum
     Teilen kopiert werden kann. Fehler werden verschluckt - Query-Params sind
@@ -147,5 +149,7 @@ def sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enab
         st.query_params["speed"] = str(speed_kmh)
         st.query_params["cost"] = str(cost_per_km)
         st.query_params["co2"] = str(co2_per_km)
+        st.query_params["depot_x"] = str(depot_x)
+        st.query_params["depot_y"] = str(depot_y)
     except Exception:
         pass

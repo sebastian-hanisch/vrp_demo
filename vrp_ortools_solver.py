@@ -5,6 +5,15 @@ Lösungsmethode zum Vergleich mit den vier selbst implementierten Heuristiken.
 
 from ortools.constraint_solver import pywrapcp, routing_enums_pb2
 
+# OR-Tools verlangt Integer-Kosten. Ohne Skalierung würde auf die nächste
+# ganze Distanz-/Zeiteinheit gerundet (bis zu 0.5 Einheiten Fehler pro Kante) -
+# das ließe den Solver intern gegen ein spürbar gröberes Ziel suchen als die
+# exakten Floats, mit denen vrp_evaluation alle fünf Methoden (inkl. OR-Tools'
+# eigenem Ergebnis) am Ende bewertet und vergleicht. Skalierung um COST_SCALE
+# vor dem Runden reduziert den Fehler auf < 1% der typischen Kantenlänge, ohne
+# die Distanz-/Zeitwerte im int64-Wertebereich von OR-Tools zu gefährden.
+COST_SCALE = 100
+
 
 def solve_with_ortools(n_stops, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, time_limit_s):
     """Löst dasselbe Problem (gleiche Distanzmatrix, gleiche Nebenbedingungen)
@@ -19,7 +28,7 @@ def solve_with_ortools(n_stops, D, demands, capacity, n_vehicles, earliest, late
     def distance_callback(from_index, to_index):
         i = manager.IndexToNode(from_index)
         j = manager.IndexToNode(to_index)
-        return int(round(D[i][j]))
+        return int(round(D[i][j] * COST_SCALE))
 
     transit_idx = routing.RegisterTransitCallback(distance_callback)
     routing.SetArcCostEvaluatorOfAllVehicles(transit_idx)
@@ -37,10 +46,10 @@ def solve_with_ortools(n_stops, D, demands, capacity, n_vehicles, earliest, late
         def time_callback(from_index, to_index):
             i = manager.IndexToNode(from_index)
             j = manager.IndexToNode(to_index)
-            return int(round(D[i][j])) + int(round(service_arr[i]))
+            return int(round(D[i][j] * COST_SCALE)) + int(round(service_arr[i] * COST_SCALE))
 
         time_idx = routing.RegisterTransitCallback(time_callback)
-        horizon = int(max(200.0, float(latest.max()) if len(latest) else 200.0) * 2)
+        horizon = int(max(200.0, float(latest.max()) if len(latest) else 200.0) * 2 * COST_SCALE)
         routing.AddDimension(time_idx, horizon, horizon, True, "Time")
         time_dimension = routing.GetDimensionOrDie("Time")
         penalty = 1000
@@ -51,8 +60,8 @@ def solve_with_ortools(n_stops, D, demands, capacity, n_vehicles, earliest, late
             # (evaluate_route). Ohne diese Zeile kennt der Solver nur die späteste
             # Grenze und kann einen "spät gewünschten" Stopp an den Tourbeginn
             # legen, was in der Nachbewertung zu unnötigen Verletzungen führt.
-            time_dimension.CumulVar(node_index).SetMin(int(round(earliest[s])))
-            time_dimension.SetCumulVarSoftUpperBound(node_index, int(round(latest[s])), penalty)
+            time_dimension.CumulVar(node_index).SetMin(int(round(earliest[s] * COST_SCALE)))
+            time_dimension.SetCumulVarSoftUpperBound(node_index, int(round(latest[s] * COST_SCALE)), penalty)
 
     search_parameters = pywrapcp.DefaultRoutingSearchParameters()
     search_parameters.first_solution_strategy = routing_enums_pb2.FirstSolutionStrategy.PATH_CHEAPEST_ARC

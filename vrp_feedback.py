@@ -15,17 +15,21 @@ import time
 
 from vrp_constants import FEEDBACK_FILE
 
+# Absolut statt cwd-relativ, damit die Datei immer neben diesem Modul landet,
+# unabhängig vom Arbeitsverzeichnis des Streamlit-Prozesses beim Hosting.
+DEFAULT_FEEDBACK_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), FEEDBACK_FILE)
 
-def log_feedback(vote, feedback_file=FEEDBACK_FILE):
+
+def log_feedback(vote, feedback_file=DEFAULT_FEEDBACK_PATH):
     """Loggt eine Feedback-Stimme in eine lokale CSV. Best-effort: schlägt der
     Schreibzugriff fehl (z. B. schreibgeschütztes Dateisystem beim Hosting),
-    wird das still ignoriert - das Feedback-UI funktioniert trotzdem, nur ohne
-    Persistenz."""
+    wird das still ignoriert und False zurückgegeben - das Feedback-UI
+    funktioniert trotzdem, nur ohne Persistenz (Rückgabewert wird vom Aufrufer
+    ausgewertet, um das dem Nutzer nicht als Erfolg zu melden)."""
     try:
-        file_exists = os.path.exists(feedback_file)
         with open(feedback_file, "a", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            if not file_exists:
+            if f.tell() == 0:
                 writer.writerow(["timestamp", "vote"])
             writer.writerow([time.strftime("%Y-%m-%d %H:%M:%S"), vote])
         return True
@@ -33,7 +37,7 @@ def log_feedback(vote, feedback_file=FEEDBACK_FILE):
         return False
 
 
-def get_feedback_counts(feedback_file=FEEDBACK_FILE):
+def get_feedback_counts(feedback_file=DEFAULT_FEEDBACK_PATH):
     """Zählt positive/negative Stimmen aus der Feedback-CSV. Gibt (0, 0)
     zurück, wenn die Datei (noch) nicht existiert oder nicht lesbar ist."""
     try:

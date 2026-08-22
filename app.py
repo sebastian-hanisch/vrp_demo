@@ -60,7 +60,7 @@ from vrp_construction import (
     savings_construction,
     sweep_construction,
 )
-from vrp_evaluation import distance_to_business, solution_totals
+from vrp_evaluation import distance_to_business, solution_capacity_excess, solution_totals
 from vrp_feedback import log_feedback
 from vrp_local_search import local_search_history
 from vrp_network import build_road_network, compute_network_distances, road_edges_xy
@@ -76,6 +76,35 @@ from vrp_presets import (
 )
 from vrp_ui_panel import render_heuristic_panel
 from vrp_visualization import build_animated_figure, build_figure
+
+
+@st.cache_data(show_spinner=False)
+def _compute_solutions(_depot, _coords, _demands, capacity, n_vehicles, _D, _earliest, _latest, _service, tw_enabled, seed, cache_key):
+    """Konstruktion (alle vier Heuristiken) + lokale-Suche-Historien einmal
+    zentral berechnen und cachen. Ohne Cache liefe dieser Block (~0.8-2s bei
+    Zeitfenstern) bei JEDEM Rerun neu, auch bei Widget-Interaktionen, die die
+    Routen gar nicht betreffen (z. B. Kraftstoffkosten-Regler, Feedback-Buttons).
+    Die numpy-Arrays sind per führendem Unterstrich von Streamlits Hashing
+    ausgenommen - `cache_key` (wie schon bei compute_network_distances) trägt
+    stattdessen explizit alles, was das Ergebnis beeinflusst."""
+    sweep_routes, sweep_infeasible = sweep_construction(_depot, _coords, _demands, n_vehicles, capacity)
+    savings_routes, savings_infeasible = savings_construction(len(_demands), _D, _demands, capacity, n_vehicles)
+    beam_routes, beam_infeasible = beam_savings(len(_demands), _D, _demands, capacity, n_vehicles, _earliest, _latest, _service, tw_enabled)
+    ga_routes, ga_infeasible = genetic_algorithm_construction(
+        len(_demands), _D, _demands, capacity, n_vehicles, _earliest, _latest, _service, tw_enabled, seed=int(seed),
+    )
+    routes_by_key = {
+        "sweep": (sweep_routes, sweep_infeasible),
+        "savings": (savings_routes, savings_infeasible),
+        "beam": (beam_routes, beam_infeasible),
+        "ga": (ga_routes, ga_infeasible),
+    }
+    histories = {
+        key: local_search_history(routes, _D, _demands, capacity, _earliest, _latest, _service, tw_enabled)
+        for key, (routes, _infeasible) in routes_by_key.items()
+    }
+    return routes_by_key, histories
+
 
 st.set_page_config(page_title="Mini-Tourenplanung (VRP) – Sebastian Hanisch", layout="wide")
 
@@ -131,11 +160,12 @@ with st.sidebar:
     n_stops = st.slider("Anzahl Lieferstopps", *bounds("n_stops_slider"), key="n_stops_slider")
     n_vehicles = st.slider("Anzahl Fahrzeuge", *bounds("n_vehicles_slider"), key="n_vehicles_slider")
     capacity = st.slider("Kapazität pro Fahrzeug", *bounds("capacity_slider"), key="capacity_slider")
-    seed = st.number_input("Zufalls-Seed", step=1, key="seed_input")
+    seed_lo, seed_hi = bounds("seed_input")
+    seed = st.number_input("Zufalls-Seed", min_value=seed_lo, max_value=seed_hi, step=1, key="seed_input")
 
     st.markdown("**Depot-Position**")
-    depot_x = st.slider("Depot x", 0, 100, 50)
-    depot_y = st.slider("Depot y", 0, 100, 50)
+    depot_x = st.slider("Depot x", *bounds("depot_x_slider"), key="depot_x_slider")
+    depot_y = st.slider("Depot y", *bounds("depot_y_slider"), key="depot_y_slider")
 
     st.markdown("**Straßennetz**")
     n_extra = st.slider("Zusätzliche Kreuzungen", *bounds("n_extra_slider"), key="n_extra_slider", help="Mehr Kreuzungen = feineres, realistischeres Netz.")
@@ -150,7 +180,9 @@ with st.sidebar:
     st.markdown("**Geschäftliche Kennzahlen**")
     speed_kmh = st.slider(
         "Ø Geschwindigkeit (km/h)", *bounds("speed_slider"), key="speed_slider",
-        help="Rechnet Distanz (interpretiert als km) in Fahrzeit um.",
+        help="Rechnet Distanz (interpretiert als km) in die angezeigte Fahrzeit um. "
+             "Wirkt sich NICHT auf Zeitfenster-Verletzungen aus - die Stopp-Zeitfenster "
+             "laufen auf ihrer eigenen, von diesem Regler unabhängigen Zeitskala.",
     )
     cost_per_km = st.slider(
         "Kosten pro km (€)", *bounds("cost_slider"), step=0.05, key="cost_slider",
@@ -167,7 +199,7 @@ with st.sidebar:
         "praktisch, ohne selbst eine neue Seed-Zahl eintippen zu müssen.",
     )
 
-sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled, n_extra, speed_kmh, cost_per_km, co2_per_km)
+sync_query_params(n_stops, n_vehicles, capacity, seed, tw_enabled, asym_enabled, n_extra, speed_kmh, cost_per_km, co2_per_km, depot_x, depot_y)
 
 if "force_regen" not in st.session_state:
     st.session_state.force_regen = False
@@ -229,7 +261,15 @@ edited["fruehester_start"] = edited["fruehester_start"].fillna(0)
 edited["spaetester_start"] = edited["spaetester_start"].fillna(999)
 edited["servicezeit"] = edited["servicezeit"].fillna(0)
 if edited["id"].isna().any():
-    edited["id"] = range(1, len(edited) + 1)
+    # Nur fehlende IDs (z. B. neu hinzugefügte Zeile) auffüllen - bestehende
+    # IDs bleiben erhalten statt bei jeder neuen Zeile komplett neu vergeben
+    # zu werden (die ID-Spalte ist oben als disabled markiert, der Nutzer
+    # kann sie also nie selbst setzen).
+    existing_ids = edited["id"].dropna()
+    next_id = int(existing_ids.max()) + 1 if not existing_ids.empty else 1
+    missing_mask = edited["id"].isna()
+    edited.loc[missing_mask, "id"] = range(next_id, next_id + int(missing_mask.sum()))
+edited["id"] = edited["id"].astype(int)
 st.session_state.stops = edited
 
 if len(edited) == 0:
@@ -260,13 +300,20 @@ D, paths_lookup = compute_network_distances(G, n_stops_eff, cache_key)
 node_positions = nx.get_node_attributes(G, "pos")
 r_edges_xy = road_edges_xy(G, asymmetric_edges)
 
-# Konstruktion für alle vier Heuristiken (die lokale Suche läuft je Tab)
-sweep_routes, sweep_infeasible = sweep_construction(depot, coords, demands, n_vehicles, capacity)
-savings_routes, savings_infeasible = savings_construction(n_stops_eff, D, demands, capacity, n_vehicles)
-beam_routes, beam_infeasible = beam_savings(n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled)
-ga_routes, ga_infeasible = genetic_algorithm_construction(
-    n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, seed=int(seed),
+# Konstruktion für alle vier Heuristiken + lokale-Suche-Historien (gecacht -
+# siehe _compute_solutions - läuft nur neu, wenn sich einer der Eingabewerte
+# im solutions_cache_key tatsächlich ändert, nicht bei jedem Rerun).
+solutions_cache_key = cache_key + (
+    n_vehicles, capacity, tw_enabled,
+    tuple(demands.tolist()), tuple(earliest.tolist()), tuple(latest.tolist()), tuple(service.tolist()),
 )
+routes_by_key, histories = _compute_solutions(
+    depot, coords, demands, capacity, n_vehicles, D, earliest, latest, service, tw_enabled, seed, solutions_cache_key,
+)
+sweep_routes, sweep_infeasible = routes_by_key["sweep"]
+savings_routes, savings_infeasible = routes_by_key["savings"]
+beam_routes, beam_infeasible = routes_by_key["beam"]
+ga_routes, ga_infeasible = routes_by_key["ga"]
 
 METHODS = [
     ("sweep", "Sweep", "🔀 Sweep", "Sortiert Stopps nach Polarwinkel um das Depot, weist sie reihum kapazitätskonform Fahrzeugen zu.", sweep_routes, sweep_infeasible),
@@ -274,14 +321,6 @@ METHODS = [
     ("beam", "Beam Search", "📡 Beam Search", f"Wendet dasselbe Ersparnis-Prinzip wie Savings an, verfolgt aber die {BEAM_WIDTH if tw_enabled else BEAM_WIDTH_NO_TW} besten Fusionsreihenfolgen parallel statt nur eine einzige - eine größere Beam-Breite kann das Ergebnis nachweislich nie verschlechtern.", beam_routes, beam_infeasible),
     ("ga", "Genetischer Algorithmus", "🧬 GA", f"Erkundet denselben Fusions-Entscheidungsraum wie Beam Search, aber evolutionär über {GA_SEEDED_GENERATIONS if tw_enabled else GA_NO_TW_GENERATIONS} Generationen mit {GA_SEEDED_POP_SIZE if tw_enabled else GA_NO_TW_POP_SIZE} Prioritätsreihenfolgen statt mit fester Beam-Breite - siehe README.", ga_routes, ga_infeasible),
 ]
-
-# Historien einmal zentral berechnen - werden sowohl für die Primäransicht
-# ("Ihre optimierte Route") als auch für die Detail-Tabs weiter unten
-# gebraucht, nicht doppelt rechnen.
-histories = {
-    key: local_search_history(routes, D, demands, capacity, earliest, latest, service, tw_enabled)
-    for key, _label, _tab_label, _caption, routes, _infeasible in METHODS
-}
 
 # Naive Ausgangslage OHNE jede Optimierung: Stopps werden in Eingabereihenfolge
 # einfach nacheinander in Fahrzeuge gefüllt (kapazitätskonform), keine
@@ -449,6 +488,7 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
             else:
                 or_routes = result["routes"]
                 or_dist, or_viol = solution_totals(or_routes, D, earliest, latest, service, tw_enabled)
+                or_cap_excess = solution_capacity_excess(or_routes, demands, capacity)
 
                 hours, cost, co2 = distance_to_business(or_dist, speed_kmh, cost_per_km, co2_per_km)
                 m1, m2, m3, m4, m5 = st.columns(5)
@@ -476,7 +516,8 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
                 ortools_summary = {
                     "label": "OR-Tools", "initial_dist": or_dist, "final_dist": or_dist,
                     "initial_viol": or_viol, "final_viol": or_viol, "improvement_pct": None,
-                    "final_routes": or_routes, "n_used": sum(1 for r in or_routes if r), "infeasible": False,
+                    "final_routes": or_routes, "n_used": sum(1 for r in or_routes if r),
+                    "infeasible": or_cap_excess > 0,
                 }
 
     with tab_compare:
@@ -672,7 +713,11 @@ Anzahl der Verletzungen (weniger ist besser), erst danach die Distanz.
 
 **Zeitfenster:** Jeder Stopp kann einen frühesten und spätesten Start sowie eine
 Servicezeit haben. Kommt ein Fahrzeug zu früh an, wartet es bis zum frühesten Start;
-kommt es nach dem spätesten Start an, gilt der Stopp als verletzt (rot markiert).
+kommt es nach dem spätesten Start an, gilt der Stopp als verletzt (rot markiert). Die
+Zeitfenster-Werte laufen auf derselben Skala wie die Kartendistanz (nicht auf Stunden) -
+der Regler "Ø Geschwindigkeit" unter "Geschäftliche Kennzahlen" rechnet Distanz nur für
+die angezeigte Fahrzeit/Kosten/CO2 um und hat keinen Einfluss darauf, welche Stopps als
+verletzt gelten.
 
 **LKW-Animation:** Zeigt die fertige Route als bewegtes Symbol statt als statisches
 Liniendiagramm – mit Play/Pause und Scrub-Regler. Alle Fahrzeuge starten und enden
@@ -696,22 +741,301 @@ selbst implementiert oder mit einem Solver wie OR-Tools.
 """
     )
 
+with st.expander("📐 Mathematische Formulierung"):
+    st.markdown(
+        r"""
+**Gegeben:**
+
+- Stopps $I = \{1,\dots,n\}$, Depot als Knoten $0$
+- Bedarf $w_i > 0$ je Stopp $i$, Fahrzeugkapazität $Q$ (`capacity`)
+- Optionale Zeitfenster $[e_i, l_i]$ und Servicezeit $s_i \geq 0$ je Stopp
+- $K$ Fahrzeuge (`n_vehicles`)
+- gerichtete Distanzmatrix $D \in \mathbb{R}_{\geq 0}^{(n+1)\times(n+1)}$, Kürzeste-Wege-Distanzen
+  im Straßennetz (`compute_network_distances`) - bei aktivem asymmetrischem Netz gilt im
+  Allgemeinen $D_{ij} \neq D_{ji}$
+
+**Gesucht:** eine Partition von $I$ in $K$ geordnete Touren $R_1,\dots,R_K$ (jeder Stopp in
+genau einer Tour, die Reihenfolge INNERHALB einer Tour ist relevant für die Distanz), die die
+Gesamtdistanz minimiert:
+"""
+    )
+    st.latex(
+        r"\min \; \sum_{v=1}^{K} \Big[\, D_{0,\,R_v(1)} "
+        r"+ \sum_{k=1}^{|R_v|-1} D_{R_v(k),\,R_v(k+1)} + D_{R_v(|R_v|),\,0} \,\Big]"
+    )
+    st.latex(
+        r"\text{u. d. N.} \quad \bigcup_{v=1}^{K} R_v = I, \qquad "
+        r"\sum_{i \in R_v} w_i \leq Q \;\;\forall v, \qquad e_i \leq t_i \leq l_i \;\;\forall i"
+    )
+    st.markdown(
+        r"""
+mit $t_i$ = Ankunftszeit an Stopp $i$, rekursiv entlang jeder Tour bestimmt (siehe
+"Zeitfenster-Simulation" unten). Als vollständiges arc-basiertes Programm mit Binärvariablen
+$x_{ijv} \in \{0,1\}$ (= 1, wenn Fahrzeug $v$ direkt von $i$ nach $j$ fährt, $i,j \in
+\{0,\dots,n\}$) und einer hinreichend großen Konstante $M$ (Big-M):
+"""
+    )
+    st.latex(r"\min \; \sum_{v=1}^{K}\sum_{i=0}^{n}\sum_{j=0}^{n} D_{ij}\, x_{ijv}")
+    st.latex(
+        r"\text{u. d. N.} \quad \sum_{v=1}^{K}\sum_{j=0}^{n} x_{ijv} = 1 \;\;\forall i \in I, "
+        r"\qquad \sum_{j=1}^{n} x_{0jv} \leq 1 \;\;\forall v, "
+        r"\qquad \sum_{i=0}^{n} x_{ihv} = \sum_{j=0}^{n} x_{hjv} \;\;\forall h, v"
+    )
+    st.latex(
+        r"\sum_{i=1}^{n} w_i \sum_{j=0}^{n} x_{ijv} \leq Q \;\;\forall v, \qquad "
+        r"t_j \geq t_i + s_i + D_{ij} - M\Big(1-\textstyle\sum_{v} x_{ijv}\Big) \;\;\forall i,j \geq 1,\; i \neq j"
+    )
+    st.markdown(
+        r"""
+Die dritte Zeile erfüllt gleich zwei Zwecke: sie propagiert die Zeitfenster entlang jeder Tour
+UND eliminiert (wie bei Miller-Tucker-Zemlin für das TSP) Kurzzirkel, die keinen Bezug zum
+Depot haben - ohne sie könnte die Lösung z. B. aus einer gültigen Depot-Tour plus einem
+separaten, nie besuchten 3er-Zirkel bestehen, der dieselben Gradbedingungen erfüllt, aber
+keine zusammenhängende Tour ist.
+
+Im Code wird dieses Programm nie in dieser Form aufgestellt oder gelöst - unsere vier
+Heuristiken unten sind konstruktiv/lokale Suche, kein Solver-Aufruf. Einzig OR-Tools
+(`vrp_ortools_solver.py`) löst intern ein äquivalentes arc-basiertes Modell über eine eigene
+Guided-Local-Search-Metaheuristik (Voudouris & Tsang, 1999), mit den Zeitfenstern als WEICHER
+statt harter Obergrenze (Strafkosten `SetCumulVarSoftUpperBound` statt Unzulässigkeit) - siehe
+unten. Da OR-Tools nur Integer-Kosten kennt, werden Distanzen/Zeiten dafür intern mit einem
+festen Faktor (`COST_SCALE = 100`) skaliert und gerundet, bevor sie an den Solver gehen - ohne
+Skalierung läge der Rundungsfehler bei bis zu 0,5 Einheiten je Kante, mit Skalierung bei unter
+1 % der typischen Kantenlänge.
+
+**NP-Härte:** Für $K=1$ Fahrzeug, $Q \to \infty$ (keine Kapazitätsgrenze) und ohne Zeitfenster
+reduziert sich das Problem exakt auf das Traveling-Salesman-Problem auf der (im Allgemeinen
+gerichteten) Matrix $D$ - konkret das **asymmetrische TSP (ATSP)**, seit Garey & Johnson (1979)
+als NP-schwer bekannt. Da $K=1$ ein zulässiger Spezialfall unseres Problems ist, ist auch die
+allgemeine Version - mehrere Fahrzeuge, Kapazität, Zeitfenster, das **Capacitated VRP with
+Time Windows (CVRPTW)** - NP-schwer (eine echte Reduktion, kein bloßes Analogieargument; zur
+Klassifikation siehe Toth & Vigo, *Vehicle Routing: Problems, Methods, and Applications*, 2014).
+
+**Warum überhaupt Heuristiken:** die Anzahl der Möglichkeiten, $n$ UNTERSCHEIDBARE Stopps auf
+$K$ unterscheidbare, geordnete Touren aufzuteilen (leere Touren erlaubt), ist
+"""
+    )
+    st.latex(r"n! \binom{n+K-1}{K-1}")
+    st.markdown(
+        r"""
+(für jede der $\binom{n+K-1}{K-1}$ Aufteilungen der Stopp-Anzahl auf die $K$ Touren gibt es
+$n!$ Möglichkeiten, ALLE Stopps in irgendeiner Reihenfolge auf diese Plätze zu verteilen - da
+die Größe jeder Tour dabei automatisch mitbestimmt wird, kürzt sich das Produkt der
+Fakultäten der einzelnen Tourlängen exakt heraus). Bereits bei den in der App maximal
+einstellbaren $n=30$ Stopps und $K=5$ Fahrzeugen ergibt das
+$30! \cdot \binom{34}{4} = 30! \cdot 46{,}376 \approx 1{,}2 \times 10^{37}$ - vollständige
+Enumeration ist damit von vornherein ausgeschlossen. `route_cost()`/`solution_totals()` in
+`vrp_evaluation.py` berechnen exakt die Zielfunktion von oben für die von den Heuristiken
+gefundenen Kandidatenlösungen.
+
+**Lexikografisch statt hart beschränkt:** weil bei ungünstig gewählten Einstellungen (zu
+wenige Fahrzeuge für die Gesamtnachfrage, zu enge Zeitfenster) selbst die OPTIMALE Lösung
+Kapazität oder Zeitfenster verletzen kann, setzt der Code keine harten Constraints durch,
+sondern eine lexikografische Zielfunktion - zuerst Kapazitätsüberschreitung minimieren, dann
+Zeitfenster-Verletzungen, erst danach Distanz:
+"""
+    )
+    st.latex(
+        r"\min_{\text{lex}} \; \Big(\underbrace{\textstyle\sum_v \max(0,\,\textstyle\sum_{i \in R_v} w_i - Q)}_{\text{Kapazitätsüberschreitung}},"
+        r"\;\; \underbrace{\textstyle\sum_v \#\{\text{Verletzungen in } R_v\}}_{\text{Zeitfenster}},"
+        r"\;\; \underbrace{\textstyle\sum_v \mathrm{cost}(R_v)}_{\text{Distanz}}\Big)"
+    )
+    st.markdown(
+        r"""
+- so liefert die App für JEDE Eingabe (auch strukturell unlösbare) stets die nach diesem
+Maßstab beste gefundene Lösung, statt einfach abzulehnen. Eine beweisbare untere Schranke für
+die kleinstmögliche Kapazitätsüberschreitung, die JEDE Zuordnung mindestens hat (Schubfach-
+prinzip: Gesamtbedarf minus Gesamtkapazität der Flotte, falls positiv), wird in
+`local_search_history`/`find_or_opt_move` als `theoretical_min_excess` genutzt, um bei genuin
+unlösbaren Instanzen nutzlose weitere Suche früh abzubrechen:
+"""
+    )
+    st.latex(r"\mathrm{excess}_{\min} = \max\Big(0,\; \sum_{i \in I} w_i - K \cdot Q\Big)")
+    st.markdown(
+        r"""
+**Sweep** (`sweep_construction`): Stopps nach Polarwinkel um das Depot sortiert,
+"""
+    )
+    st.latex(r"\theta_i = \operatorname{atan2}(y_i - y_0,\; x_i - x_0), \qquad \text{Reihenfolge} = \operatorname*{argsort}_i \theta_i")
+    st.markdown(
+        r"""
+danach reihum ("rotierend") dem aktuellen Fahrzeug zugewiesen, solange dessen Restkapazität
+reicht - reicht sie bei KEINEM Fahrzeug (nach bis zu $K$ Versuchen), wird der Stopp trotzdem
+dem am wenigsten ausgelasteten Fahrzeug zugeteilt und die Lösung als `infeasible` markiert
+(lokale Suche repariert das im Anschluss so weit wie möglich). Einfachste der vier Heuristiken,
+$O(n \log n)$ (dominiert vom Sortieren), keine Distanzmatrix-Auswertung nötig.
+
+**Savings-Algorithmus** (`savings_construction`, Clarke & Wright, 1964): startet mit einer
+Einzeltour je Stopp und fusioniert Touren in absteigender Ersparnis-Reihenfolge. Weil $D$
+asymmetrisch sein kann, wird die Ersparnis für BEIDE Fusionsrichtungen getrennt geführt -
+Fusion von Route $\dots\to i$ (endet in $i$) mit Route $j\to\dots$ (beginnt in $j$) ersetzt die
+Kanten $i\to\text{Depot}$ und $\text{Depot}\to j$ durch $i\to j$:
+"""
+    )
+    st.latex(
+        r"s_{ij} = D_{i,0} + D_{0,j} - D_{i,j}, \qquad "
+        r"s_{ji} = D_{j,0} + D_{0,i} - D_{j,i} \qquad (i,j \in I,\; i\neq j)"
+    )
+    st.markdown(
+        r"""
+(Indizes hier auf Stopp-Ebene, im Code um 1 verschoben wegen Depot-Knoten 0). Bei symmetrischem
+$D$ gilt $s_{ij}=s_{ji}$ und das reduziert sich auf die klassische, ungerichtete Clarke-Wright-
+Ersparnis. Beide Kandidaten werden zusammen absteigend sortiert und der Reihe nach akzeptiert,
+sofern die Kapazität nicht überschritten wird UND die beiden Routen tatsächlich in dieser
+Richtung aneinanderstoßen (Route endet in $i$, andere beginnt in $j$). Bleiben nach allen
+Fusionen mehr Touren als Fahrzeuge übrig, werden die am wenigsten ausgelasteten paarweise
+zwangsfusioniert, bis die Anzahl passt (mit `infeasible`-Markierung statt Datenverlust).
+Laufzeit $O(n^2 \log n)$ (Sortieren von $O(n^2)$ Ersparnis-Kandidaten). Für den Savings-
+Algorithmus ist - anders als etwa First-Fit-Decreasing beim Bin-Packing - keine
+Worst-Case-Approximationsgüte bewiesen; er gilt in der VRP-Literatur dennoch seit Jahrzehnten
+als starke, einfache Praxis-Heuristik.
+
+**Beam Search über Savings-Fusionen** (`beam_savings`): derselbe Ersparnis-Kandidatenpool wie
+oben, aber statt jede Fusion deterministisch zu akzeptieren, werden bis zu `beam_width`
+Teilzustände (Partitionen von $I$ in Touren) parallel verfolgt. Bei jedem Fusionsschritt $(i,j)$
+erzeugt jeder Zustand im Beam sowohl einen "fusioniert"- als auch einen "übersprungen"-
+Kandidaten; aus dem gemeinsamen Kandidatenpool beansprucht jeder Beam-Slot SOFORT nach seiner
+eigenen Erweiterung das beste verbleibende Element (monobeam-Verschachtelung, Lemons, Linares
+López, Holte & Ruml, "Beam Search: Faster and Monotonic", ICAPS 2022) - dieses Verschachte-
+lungsmuster ist notwendig (nicht nur eine Optimierung), damit eine größere Beam-Breite das
+Ergebnis nachweislich nie verschlechtern kann. Kapazität wird bereits WÄHREND der Beam-Suche
+hart erzwungen (eine Fusion, die $Q$ überschreiten würde, wird gar nicht erst als Kandidat
+erzeugt) - Zwischenzustände sind daher immer kapazitätszulässig; erst die abschließende
+Zwangskonsolidierung (falls mehr Touren als Fahrzeuge übrig sind) kann das ändern. Bewertet
+wird während der Suche lexikografisch nach (Zeitfenster-Verletzungen, Distanz):
+"""
+    )
+    st.latex(
+        r"\mathrm{state\_score}(\sigma) = \Big(\sum_{R \in \sigma} \#\{\text{Verletzungen in } R\},"
+        r"\;\; \sum_{R \in \sigma} \mathrm{cost}(R)\Big)"
+    )
+    st.markdown(
+        r"""
+Nach Verarbeitung aller Ersparnis-Kandidaten wird jeder im Beam verbliebene, EINDEUTIGE
+Endzustand konsolidiert und vollständig mit lokaler Suche bewertet (nicht nur an seinen rohen
+Kosten gemessen) - der nach (Kapazitätsüberschreitung, Zeitfenster-Verletzungen, Distanz) beste
+gewinnt. Laufzeit $O(n^2 \cdot \mathrm{beam\_width})$ für die Kern-Suche, dominiert in der Praxis
+aber von der abschließenden vollständigen lokalen-Suche-Bewertung aller eindeutigen Kandidaten.
+
+**Genetischer Algorithmus** (`genetic_algorithm_construction`): das Chromosom ist NICHT eine
+Stopp-Reihenfolge, sondern eine Permutation $\pi$ der $m = n(n-1)$ Indizes der
+Ersparnis-Kandidatenliste von oben (beide Richtungen je Paar) - GA erkundet damit denselben
+Entscheidungsraum wie `beam_savings`, aber evolutionär statt mit fester Beam-Breite. Eine
+Dekodierfunktion `_decode_merge_priority` wendet die Fusionen in der durch $\pi$ gegebenen
+Reihenfolge an (statt streng nach Ersparnis absteigend) und akzeptiert eine Fusion nur, wenn sie
+weder Kapazität überschreitet NOCH die Zeitfenster-Verträglichkeit der beiden Einzeltouren
+verschlechtert. Fitness (zu minimieren, lexikografisch):
+"""
+    )
+    st.latex(
+        r"\mathrm{fitness}(\pi) = \big(\mathrm{Kapazitätsüberschreitung},\;"
+        r"\text{Zeitfenster-Verletzungen},\; \text{Distanz}\big) \text{ von } \mathrm{decode}(\pi)"
+    )
+    st.markdown(
+        r"""
+Population: die natürliche (rein nach Ersparnis absteigend sortierte) Reihenfolge als "Impfung",
+leichte Mutationen davon für Vielfalt in der Nähe dieses starken Startpunkts, plus zufällige
+Permutationen. Je Generation: Turnier-Selektion (Gruppengröße 3), Order Crossover (OX,
+respektiert die relative Reihenfolge beider Eltern-Permutationen ohne Duplikate), Mutation
+(30 % Rate: entweder Segment-Umkehr oder gezielte Einzel-Umplatzierung), Elitismus (bestes
+Individuum überlebt unverändert). Anders als bei `beam_savings` ist hier KEINE strukturelle
+Monotonie-Garantie in der Populationsgröße bewiesen (eine größere Population verbraucht die
+Zufallszahlenfolge grundlegend anders - kein Verschachtelungsverhältnis wie bei der Beam-
+Breite); in der Generationenzahl gilt Monotonie auf Rohebene durch Elitismus, überträgt sich
+aber nicht immer verlässlich auf das Ergebnis NACH lokaler Suche.
+
+**2-opt** (`find_two_opt_move`): entfernt zwei Kanten EINER Tour und verbindet sie über die
+umgekehrte Richtung des dazwischenliegenden Abschnitts neu - Standardzug für das TSP (Croes,
+1958). Für eine Tour $R=(r_1,\dots,r_L)$ und $1 \leq i < j \leq L$:
+"""
+    )
+    st.latex(r"R' = (r_1,\dots,r_{i-1},\, r_j, r_{j-1},\dots, r_i,\, r_{j+1},\dots,r_L)")
+    st.markdown(
+        r"""
+Erste-Verbesserung-Suche über alle $O(L^2)$ Paare $(i,j)$ je Tour; akzeptiert bei weniger
+Zeitfenster-Verletzungen, oder bei gleicher Verletzungszahl und kürzerer Distanz. 2-opt kann die
+Kapazitätsauslastung einer Tour NIE verändern (reine Umsortierung innerhalb derselben Tour).
+
+**Or-opt** (`find_or_opt_move`, Or, 1976): verschiebt ein kurzes Segment (Länge 1 oder 2) aus
+einer Tour an eine beliebige Position - auch in einer ANDEREN Fahrzeugtour. Behebt damit die
+zentrale Schwäche von reinem 2-opt (kann Stopps nie zwischen Fahrzeugen verschieben). Ein Zug
+wird lexikografisch akzeptiert:
+"""
+    )
+    st.latex(
+        r"\text{besser} \iff \Delta_{\text{Kapazität}} < 0 \;\lor\; "
+        r"(\Delta_{\text{Kapazität}} = 0 \land \Delta_{\text{Verletzungen}} < 0) \;\lor\; "
+        r"(\Delta_{\text{Kapazität}} = \Delta_{\text{Verletzungen}} = 0 \land \Delta_{\text{Distanz}} < 0)"
+    )
+    st.markdown(
+        r"""
+Kapazität steht damit als ranghöchstes Kriterium VOR Zeitfenstern und Distanz - ein Zug wird
+also auch dann akzeptiert, wenn er Distanz oder Zeitfenster verschlechtert, solange er die
+Gesamt-Kapazitätsüberschreitung senkt.
+
+**Swap** (`find_swap_move`): tauscht einen einzelnen Stopp zwischen zwei Touren, dieselbe
+lexikografische Akzeptanzregel wie Or-opt. Wird nur versucht, wenn mindestens eine der beiden
+Touren bereits die Kapazität überschreitet (reine Distanz-/Zeitfenster-Verbesserung liegt schon
+im Suchraum von 2-opt/Or-opt) - denn Or-opt kann nur EINFÜGEN, nie gleichzeitig etwas aus der
+Zielroute entfernen, weshalb es bei knapper Restkapazität JEDER anderen Tour steckenbleiben
+kann, während ein echter Tausch (kleinerer Stopp rein, größerer raus) trotzdem entlastet.
+
+**Kombinierte lokale Suche** (`local_search_history`): pro Iteration wird zuerst ein
+verbessernder 2-opt-Zug gesucht (günstigster Zug-Typ), sonst Or-opt, und - nur falls die
+Gesamt-Kapazitätsüberschreitung noch über der beweisbaren Untergrenze $\mathrm{excess}_{\min}$
+von oben liegt - Swap. Abbruch, sobald keiner der drei Zug-Typen mehr eine Verbesserung findet
+oder `LOCAL_SEARCH_MAX_MOVES = 200` Züge erreicht sind. Alle vier Konstruktionsheuristiken
+durchlaufen dieselbe kombinierte lokale Suche im Anschluss - eine faire, gemeinsame
+Verbesserungsstufe für den Methodenvergleich.
+
+**Zeitfenster-Simulation** (`route_timeline`): entlang einer Tour wird die Ankunftszeit
+rekursiv fortgeschrieben, mit Wartezeit bis zum frühesten Start und Verletzungsmarkierung bei
+Ankunft nach dem spätesten Start (mit Toleranz $\varepsilon = 10^{-9}$ gegen Fließkomma-
+Rundung):
+"""
+    )
+    st.latex(
+        r"t_0 = 0, \qquad a_{r_k} = t_{r_{k-1}} + D_{r_{k-1},\,r_k}, "
+        r"\qquad t_{r_k} = \max(a_{r_k},\, e_{r_k}) + s_{r_k}"
+    )
+    st.latex(r"\text{Verletzung an } r_k \iff \max(a_{r_k}, e_{r_k}) > l_{r_k} + \varepsilon")
+    st.markdown(
+        r"""
+**OR-Tools** (`solve_with_ortools`): unabhängiger fünfter Solver, löst dasselbe arc-basierte
+Modell von oben mit einer eigenen Konstruktionsstrategie (Path-Cheapest-Arc) und anschließender
+Guided-Local-Search-Metaheuristik (Voudouris & Tsang, 1999) - bestraft häufig genutzte Kanten
+("guidance penalties"), um aus lokalen Optima herauszufinden, ohne den Suchraum vollständig
+abzusuchen. Zeitfenster sind als weiche Obergrenze modelliert (Strafkosten bei Überschreitung
+statt harter Unzulässigkeit, `penalty = 1000` je Zeiteinheit Verspätung in skalierten Einheiten)
+- dieselbe Philosophie wie die lexikografische Zielfunktion unserer eigenen Heuristiken, nur
+dass OR-Tools Strafkosten statt einer echten lexikografischen Rangfolge verwendet. Innerhalb
+eines festen Zeitlimits (`ORTOOLS_MAX_TIME_LIMIT`) liefert der Solver die beste in dieser Zeit
+gefundene Lösung, ohne Optimalitätsgarantie bei den in der App üblichen Instanzgrößen.
+"""
+    )
+
 st.markdown("---")
 
 st.markdown("#### War diese Demo hilfreich für Sie?")
 if st.session_state.get("feedback_given"):
     vote_text = "👍 positiv" if st.session_state["feedback_given"] == "up" else "👎 negativ"
-    st.success(f"Danke für Ihr Feedback ({vote_text})! 🙏")
+    if st.session_state.get("feedback_saved", True):
+        st.success(f"Danke für Ihr Feedback ({vote_text})! 🙏")
+    else:
+        st.warning(
+            f"Danke für Ihr Feedback ({vote_text})! Es konnte allerdings nicht "
+            "dauerhaft gespeichert werden (z. B. schreibgeschütztes Dateisystem beim Hosting)."
+        )
 else:
     fb_col1, fb_col2 = st.columns(2)
     with fb_col1:
         if st.button("👍 Ja", key="feedback_up_btn", use_container_width=True):
-            log_feedback("up")
+            st.session_state["feedback_saved"] = log_feedback("up")
             st.session_state["feedback_given"] = "up"
             st.rerun()
     with fb_col2:
         if st.button("👎 Nein", key="feedback_down_btn", use_container_width=True):
-            log_feedback("down")
+            st.session_state["feedback_saved"] = log_feedback("down")
             st.session_state["feedback_given"] = "down"
             st.rerun()
 
