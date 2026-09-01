@@ -38,5 +38,3 @@ DEFAULT_CO2_PER_KM = 0.8  # kg CO2/km - Richtwert für einen kleinen/mittleren D
 
 ORTOOLS_MAX_TIME_LIMIT = 5  # gedeckelt (statt 10s) - Schutz vor Ressourcenlast bei mehreren gleichzeitigen Besuchern auf kostenlosem Hosting
 ORTOOLS_COOLDOWN_BUFFER = 3  # Sekunden Wartezeit zusätzlich zum Zeitlimit, bevor erneut gelöst werden kann
-
-FEEDBACK_FILE = "feedback_log.csv"

@@ -18,7 +18,7 @@ Features:
   Distanzwerte.
 - LKW-Animation (Play/Pause + Scrub-Regler) und PDF-Tourenplan-Export.
 - Drei Ein-Klick-Beispielszenarien für Erstbesucher, Permalink (URL spiegelt
-  die aktuelle Konfiguration), Feedback-Mechanismus.
+  die aktuelle Konfiguration).
 
 Lauffähig mit: streamlit run app.py
 
@@ -30,7 +30,7 @@ Für ein reales Kundenprojekt würde man an dieser Stelle echte
 Straßennetz-/Routingdaten einbinden (z. B. via OSM/OSRM).
 
 Code-Struktur: Die eigentliche Logik (Algorithmen, Straßennetz, PDF-Export,
-Visualisierung, Feedback) liegt in den Modulen vrp_*.py neben dieser Datei.
+Visualisierung) liegt in den Modulen vrp_*.py neben dieser Datei.
 app.py enthält nur noch den Streamlit-Ablauf (Sidebar, Tabs, Vergleich). Das
 hält die Logik unabhängig von einer laufenden Streamlit-Session testbar -
 die Testsuite importiert sie direkt, ohne Umweg über Skript-Extraktion.
@@ -61,7 +61,6 @@ from vrp_construction import (
     sweep_construction,
 )
 from vrp_evaluation import distance_to_business, solution_capacity_excess, solution_totals
-from vrp_feedback import log_feedback
 from vrp_local_search import local_search_history
 from vrp_network import build_road_network, compute_network_distances, road_edges_xy
 from vrp_ortools_solver import solve_with_ortools
@@ -1016,31 +1015,8 @@ gefundene Lösung, ohne Optimalitätsgarantie bei den in der App üblichen Insta
 
 st.markdown("---")
 
-st.markdown("#### War diese Demo hilfreich für Sie?")
-if st.session_state.get("feedback_given"):
-    vote_text = "👍 positiv" if st.session_state["feedback_given"] == "up" else "👎 negativ"
-    if st.session_state.get("feedback_saved", True):
-        st.success(f"Danke für Ihr Feedback ({vote_text})! 🙏")
-    else:
-        st.warning(
-            f"Danke für Ihr Feedback ({vote_text})! Es konnte allerdings nicht "
-            "dauerhaft gespeichert werden (z. B. schreibgeschütztes Dateisystem beim Hosting)."
-        )
-else:
-    fb_col1, fb_col2 = st.columns(2)
-    with fb_col1:
-        if st.button("👍 Ja", key="feedback_up_btn", use_container_width=True):
-            st.session_state["feedback_saved"] = log_feedback("up")
-            st.session_state["feedback_given"] = "up"
-            st.rerun()
-    with fb_col2:
-        if st.button("👎 Nein", key="feedback_down_btn", use_container_width=True):
-            st.session_state["feedback_saved"] = log_feedback("down")
-            st.session_state["feedback_given"] = "down"
-            st.rerun()
-
 st.caption(
-    "Diese Demo ist Teil des Portfolios von Sebastian Hanisch – Operations Research "
-    "und Machine Learning. Interesse an einer maßgeschneiderten Lösung für Ihr "
-    "Unternehmen? [Kontakt aufnehmen](#)"
+    "Diese Demo ist Teil des Portfolios von [Sebastian Hanisch](https://sebastianhanisch.net) – "
+    "Operations Research und Machine Learning. Interesse an einer maßgeschneiderten Lösung für "
+    "Ihr Unternehmen? [Kontakt aufnehmen](https://sebastianhanisch.net/kontakt.html)"
 )

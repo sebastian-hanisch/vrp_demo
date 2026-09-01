@@ -761,30 +761,6 @@ def test_ortools_time_limit_capped_at_5s():
     assert slider.max <= 5
 
 
-def test_feedback_buttons_present_before_voting():
-    at = fresh_app()
-    assert_ok(at)
-    up = [b for b in at.button if b.key == "feedback_up_btn"]
-    down = [b for b in at.button if b.key == "feedback_down_btn"]
-    assert up and down
-
-
-def test_feedback_thumbs_up_shows_thank_you():
-    at = fresh_app()
-    up = [b for b in at.button if b.key == "feedback_up_btn"][0]
-    up.click().run(timeout=TIMEOUT)
-    assert_ok(at)
-    assert any("Danke" in str(s.value) for s in at.success)
-
-
-def test_feedback_thumbs_down_shows_thank_you():
-    at = fresh_app()
-    down = [b for b in at.button if b.key == "feedback_down_btn"][0]
-    down.click().run(timeout=TIMEOUT)
-    assert_ok(at)
-    assert any("Danke" in str(s.value) for s in at.success)
-
-
 def test_ortools_solve_no_tw():
     at = fresh_app()
     ortools_slider = [s for s in at.slider if "Zeitlimit" in s.label][0]
@@ -860,7 +836,6 @@ def _load_pure_functions():
     import vrp_constants as c
     import vrp_construction as construction
     import vrp_evaluation as evaluation
-    import vrp_feedback as feedback
     import vrp_local_search as local_search
     import vrp_network as network
     import vrp_ortools_solver as ortools_solver
@@ -873,7 +848,7 @@ def _load_pure_functions():
         "OR_OPT_SEG_LENGTHS": c.OR_OPT_SEG_LENGTHS, "LOCAL_SEARCH_MAX_MOVES": c.LOCAL_SEARCH_MAX_MOVES,
         "DEFAULT_SPEED_KMH": c.DEFAULT_SPEED_KMH, "DEFAULT_COST_PER_KM": c.DEFAULT_COST_PER_KM,
         "DEFAULT_CO2_PER_KM": c.DEFAULT_CO2_PER_KM, "ORTOOLS_MAX_TIME_LIMIT": c.ORTOOLS_MAX_TIME_LIMIT,
-        "ORTOOLS_COOLDOWN_BUFFER": c.ORTOOLS_COOLDOWN_BUFFER, "FEEDBACK_FILE": "test_feedback_log.csv",
+        "ORTOOLS_COOLDOWN_BUFFER": c.ORTOOLS_COOLDOWN_BUFFER,
         "build_road_network": network.build_road_network,
         "compute_network_distances": network.compute_network_distances,
         "road_edges_xy": network.road_edges_xy,
@@ -900,8 +875,6 @@ def _load_pure_functions():
         "local_search_history": local_search.local_search_history,
         "solve_with_ortools": ortools_solver.solve_with_ortools,
         "generate_tour_plan_pdf": pdf_export.generate_tour_plan_pdf,
-        "log_feedback": feedback.log_feedback,
-        "get_feedback_counts": feedback.get_feedback_counts,
     }
 
 
@@ -1869,18 +1842,6 @@ def test_distance_to_business_zero_speed_safe(funcs):
     assert hours == 0.0  # darf nicht durch 0 teilen
     assert cost == pytest.approx(40.0)
     assert co2 == pytest.approx(64.0)
-
-
-def test_feedback_log_and_count_roundtrip(funcs, tmp_path):
-    """Testet log_feedback/get_feedback_counts isoliert gegen eine temporäre
-    Datei - dank explizitem feedback_file-Parameter (statt einer global
-    gelesenen Konstante) ohne Monkeypatching möglich."""
-    log_file = str(tmp_path / "feedback_test.csv")
-    assert funcs["get_feedback_counts"](log_file) == (0, 0)
-    assert funcs["log_feedback"]("up", log_file) is True
-    assert funcs["log_feedback"]("up", log_file) is True
-    assert funcs["log_feedback"]("down", log_file) is True
-    assert funcs["get_feedback_counts"](log_file) == (2, 1)
 
 
 
