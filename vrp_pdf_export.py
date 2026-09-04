@@ -35,9 +35,9 @@ def generate_tour_plan_pdf(label, routes, ids, demands, D, earliest, latest, ser
     pdf.cell(0, 8, "Zusammenfassung", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.set_font("Helvetica", "", 10)
     pdf.cell(0, 6, f"Gesamtdistanz: {total_dist:.1f} km", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 6, f"Geschaetzte Fahrzeit: {total_hours:.1f} h (bei {speed_kmh} km/h)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 6, f"Geschaetzte Kraftstoffkosten: {total_cost:.0f} EUR (bei {cost_per_km:.2f} EUR/km)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
-    pdf.cell(0, 6, f"Geschaetzter CO2-Ausstoss: {total_co2:.0f} kg (bei {co2_per_km:.2f} kg/km)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 6, f"Geschätzte Fahrzeit: {total_hours:.1f} h (bei {speed_kmh} km/h)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 6, f"Geschätzte Kraftstoffkosten: {total_cost:.0f} EUR (bei {cost_per_km:.2f} EUR/km)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
+    pdf.cell(0, 6, f"Geschätzter CO2-Ausstoß: {total_co2:.0f} kg (bei {co2_per_km:.2f} kg/km)", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     pdf.cell(0, 6, f"Fahrzeuge im Einsatz: {sum(1 for r in routes if r)} von {len(routes)}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
     if tw_enabled:
         pdf.cell(0, 6, f"Zeitfenster-Verletzungen: {total_viol}", new_x=XPos.LMARGIN, new_y=YPos.NEXT)
