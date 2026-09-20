@@ -123,19 +123,19 @@ st.caption("🎯 Schnellstart – ein Beispielszenario laden:")
 preset_col1, preset_col2, preset_col3 = st.columns(3)
 with preset_col1:
     st.button(
-        "📦 Innenstadt-Zustellung", use_container_width=True,
+        "📦 Innenstadt-Zustellung", width="stretch",
         on_click=apply_preset, args=(15, 3, 27, False, 10),
         help="15 Stopps, 3 Fahrzeuge, moderate Kapazität, keine Zeitfenster.",
     )
 with preset_col2:
     st.button(
-        "⏰ Enge Zeitfenster", use_container_width=True,
+        "⏰ Enge Zeitfenster", width="stretch",
         on_click=apply_preset, args=(12, 3, 25, True, 5),
         help="12 Stopps mit engen Zeitfenstern – zeigt Zielkonflikte zwischen Distanz und Pünktlichkeit.",
     )
 with preset_col3:
     st.button(
-        "🚚 Große Flotte, knappe Kapazität", use_container_width=True,
+        "🚚 Große Flotte, knappe Kapazität", width="stretch",
         on_click=apply_preset, args=(28, 5, 34, False, 3),
         help="28 Stopps, 5 Fahrzeuge mit knapper Kapazität – viele kurze Touren nötig.",
     )
@@ -193,7 +193,7 @@ with st.sidebar:
     )
 
     st.button(
-        "🎲 Neue Stopps generieren", use_container_width=True, on_click=randomize_seed,
+        "🎲 Neue Stopps generieren", width="stretch", on_click=randomize_seed,
         help="Würfelt einen neuen Zufalls-Seed und erzeugt damit ein komplett neues Szenario - "
         "praktisch, ohne selbst eine neue Seed-Zahl eintippen zu müssen.",
     )
@@ -242,7 +242,7 @@ display_cols = ["id", "x", "y", "bedarf"] + (["fruehester_start", "spaetester_st
 edited = st.data_editor(
     st.session_state.stops,
     num_rows="dynamic",
-    use_container_width=True,
+    width="stretch",
     column_order=display_cols,
     column_config={
         "id": st.column_config.NumberColumn("ID", disabled=True),
@@ -384,7 +384,7 @@ fig_best = build_figure(
     depot, coords, ids, best_own["routes"], paths_lookup, node_positions, r_edges_xy,
     D, earliest, latest, service, tw_enabled,
 )
-st.plotly_chart(fig_best, use_container_width=True, key="primary_best_plot")
+st.plotly_chart(fig_best, width="stretch", key="primary_best_plot")
 
 pdf_bytes_best = generate_tour_plan_pdf(
     "Optimierte Route", best_own["routes"], ids, demands, D, earliest, latest, service,
@@ -510,7 +510,7 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
                     fig_or = build_animated_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
                 else:
                     fig_or = build_figure(depot, coords, ids, or_routes, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
-                st.plotly_chart(fig_or, use_container_width=True, key=f"ortools_plot_{animate_or}")
+                st.plotly_chart(fig_or, width="stretch", key=f"ortools_plot_{animate_or}")
 
                 ortools_summary = {
                     "label": "OR-Tools", "initial_dist": or_dist, "final_dist": or_dist,
@@ -541,7 +541,7 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
                     "Kapazität überschritten": "ja" if s["infeasible"] else "nein",
                 }
             )
-        st.dataframe(pd.DataFrame(comp_rows), use_container_width=True, hide_index=True)
+        st.dataframe(pd.DataFrame(comp_rows), width="stretch", hide_index=True)
         st.caption(
             "Sweep, Savings, Beam Search und der genetische Algorithmus werden alle mit derselben "
             "eigenen lokalen Suche (2-opt + Or-opt) verbessert (daher Start-/Enddistanz). OR-Tools "
@@ -662,7 +662,7 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
             with col:
                 st.caption(f"{s['label']} (final)")
                 fig_c = build_figure(depot, coords, ids, s["final_routes"], paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled)
-                st.plotly_chart(fig_c, use_container_width=True, key=f"compare_{s['label']}")
+                st.plotly_chart(fig_c, width="stretch", key=f"compare_{s['label']}")
 
 with st.expander("Wie funktioniert diese Demo?"):
     st.markdown(

@@ -106,13 +106,13 @@ def render_heuristic_panel(prefix, label, history, depot, coords, ids, demands, 
     else:
         fig = build_figure(depot, coords, ids, routes_snapshot, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled, capacity=capacity)
     plot_slot = st.empty()
-    plot_slot.plotly_chart(fig, use_container_width=True, key=f"{prefix}_plot_{step}_{animate}")
+    plot_slot.plotly_chart(fig, width="stretch", key=f"{prefix}_plot_{step}_{animate}")
 
     if auto_play:
         for s in range(n_steps):
             snap = history[s][0]
             f = build_figure(depot, coords, ids, snap, paths_lookup, node_positions, r_edges_xy, D, earliest, latest, service, tw_enabled, capacity=capacity)
-            plot_slot.plotly_chart(f, use_container_width=True, key=f"{prefix}_auto_{s}")
+            plot_slot.plotly_chart(f, width="stretch", key=f"{prefix}_auto_{s}")
             time.sleep(0.12)
 
     st.markdown("**Distanzverlauf über die Verbesserungsschritte**")
@@ -121,7 +121,7 @@ def render_heuristic_panel(prefix, label, history, depot, coords, ids, demands, 
     fig_line.add_trace(go.Scatter(x=list(range(n_steps)), y=dist_series, mode="lines+markers", line=dict(color="#2563eb")))
     fig_line.add_vline(x=step, line_dash="dash", line_color="gray")
     fig_line.update_layout(xaxis_title="Iteration", yaxis_title="Gesamtdistanz (km)", height=260, margin=dict(l=10, r=10, t=10, b=10))
-    st.plotly_chart(fig_line, use_container_width=True, key=f"{prefix}_line")
+    st.plotly_chart(fig_line, width="stretch", key=f"{prefix}_line")
 
     if tw_enabled:
         st.markdown("**Ankunftszeiten je Fahrzeug (aktueller Schritt)**")
@@ -140,7 +140,7 @@ def render_heuristic_panel(prefix, label, history, depot, coords, ids, demands, 
                     }
                 )
         if rows:
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+            st.dataframe(pd.DataFrame(rows), width="stretch", hide_index=True)
 
     return {
         "label": label, "initial_dist": initial_dist, "final_dist": final_dist,
