@@ -1256,3 +1256,23 @@ längeren, aber funktionalen Scroll (bewusst nicht weiter vereinfacht).
 ---
 
 Teil des [Operations-Research-Demo-Portfolios](https://sebastianhanisch.net/demos.html) von [Sebastian Hanisch](https://sebastianhanisch.net) — Operations Research und Machine Learning. Interesse an einer maßgeschneiderten Lösung? [Kontakt aufnehmen](https://sebastianhanisch.net/kontakt.html).
+
+## 7. Verwandte Demos mit demselben mathematischen Modell
+
+Verschiedene Themen im Portfolio teilen (fast) dasselbe Modell. Vor einer neuen Demo-Idee deshalb das
+Modell vergleichen, nicht die Kulisse (Stand 2026-09-23):
+
+- **Fahrgeschwindigkeit gegen Zeitfenster** (CO2-optimale Geschwindigkeit, Pollution-Routing): das Geschwindigkeitsteilproblem
+  ist die stetige, konvexe Optimierung der `slow-steaming-demo` (kubische Verbrauchskosten, Fenster gemeinsam statt lokal
+  berücksichtigt). Neu wäre nur die Kopplung mit der Tourenwahl. Als Dopplung verworfen.
+- **Rückladungen finden / Leerfahrten reduzieren:** derselbe Bestandsausgleich im Zeit-Raum-Netz wie in der
+  `leercontainer-demo` (Min-Cost-Flow), mit Lkw statt Containern. Als Dopplung verworfen. Ein VRP mit Rückladungen
+  (Backhauls) auf Tourenebene wäre dagegen ein Routing-Modell.
+- **Robuste Touren bei unsicheren Standzeiten oder neuen Aufträgen im Tagesverlauf:** das Muster "starrer Plan gegen
+  reaktives Nachplanen" gibt es schon in `fahrzeugflotte-demo`, `robuste-kaiplatz-demo`, `blockzuweisung-demo` und
+  `hofrobust-demo`. Dort hängt der Sieger von der Störungsart ab (siehe `hofrobust-demo`). Neu bauen nur mit einem Hook
+  jenseits von "reaktiv gewinnt".
+- **Tourenplanung + Packen** (2L/3L-CVRP): Kopplung dieser Demo mit `pack_demo`. Möglich, aber eher ein Nachfolger beider.
+- **Gleiche CVRP-Basis:** `vrp-nachbarschaften-demo` (Züge zwischen Routen) und `alns-demo` (Destroy/Repair) der
+  Trajektorien-Metaheuristiken-Linie. Deren Befunde (Inter-Route-Züge mit Optimum bei mittlerer Kapazität, adaptive
+  Operator-Gewichte ohne messbaren Vorteil) gelten für diese Heuristiken als Vergleichsmaßstab.
