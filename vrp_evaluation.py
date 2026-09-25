@@ -6,6 +6,8 @@ alle fünf Lösungsmethoden (Sweep, Savings, Beam Search, GA, OR-Tools) - das
 macht den Vergleich zwischen ihnen fair.
 """
 
+import numpy as np
+
 from vrp_constants import DEFAULT_CO2_PER_KM, EPS
 
 
@@ -29,6 +31,24 @@ def route_capacity_excess(route, demands, capacity):
 def solution_capacity_excess(routes, demands, capacity):
     """Summe der Kapazitätsüberschreitung über alle Fahrzeugtouren."""
     return sum(route_capacity_excess(r, demands, capacity) for r in routes)
+
+
+def clamp_invalid_time_windows(earliest, latest):
+    """Sorgt dafür, dass jedes Zeitfenster gültig ist (frühester Start <=
+    spätester Start). Auf Nutzeranfrage ergänzt: die editierbare Stopp-Tabelle
+    in app.py validierte bisher nicht, dass 'Frühester Start' <= 'Spätester
+    Start' ist - ein invertiertes Zeitfenster (z. B. frühester=100,
+    spätester=50) wurde klaglos übernommen und führte dazu, dass route_timeline
+    den betroffenen Stopp bei JEDER Ankunftszeit als verletzt markierte, ohne
+    jeden Hinweis, dass das Zeitfenster selbst unmöglich ist. Hebt hier
+    stattdessen 'spätester Start' auf 'frühester Start' an (nulllanges,
+    gültiges Zeitfenster) und meldet, welche Indizes betroffen waren, damit
+    aufrufender Code den Nutzer informieren kann."""
+    earliest = np.asarray(earliest, dtype=float)
+    latest = np.asarray(latest, dtype=float)
+    invalid_mask = earliest > latest
+    fixed_latest = np.where(invalid_mask, earliest, latest)
+    return fixed_latest, invalid_mask
 
 
 def route_timeline(route, D, earliest, latest, service):

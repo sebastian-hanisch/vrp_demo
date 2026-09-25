@@ -66,7 +66,24 @@ def find_or_opt_move(routes, D, demands, capacity, earliest, latest, service, tw
     (Kapazitätsüberschreitung, Zeitfenster-Verletzungen, Distanz). Ein Zug
     wird akzeptiert, wenn er die Kapazitätsüberschreitung verringert - auch
     wenn er Distanz oder Zeitfenster verschlechtert -, sonst bei gleicher
-    Kapazitätsüberschreitung nach denselben Regeln wie zuvor."""
+    Kapazitätsüberschreitung nach denselben Regeln wie zuvor.
+
+    Codereview-Fix: der Schnellausstieg (wenn Quelle bereits zulässig ist
+    oder die Systemüberschreitung schon die theoretische Untergrenze
+    erreicht hat) prüfte bisher nur, ob das ZIEL für sich allein die
+    Kapazität überschreiten würde (`target_load + seg_demand > capacity`) -
+    ohne zu berücksichtigen, dass die QUELLE durch das Entfernen des
+    Segments gleichzeitig entlastet wird. Dadurch wurden Züge verworfen, bei
+    denen die Gesamtüberschreitung exakt gleich bleibt (insbesondere an der
+    theoretischen Untergrenze), die aber die Distanz spürbar verbessert
+    hätten - die lokale Suche blieb in solchen Fällen in einer unnötig
+    langen Lösung stecken, obwohl eine kürzere mit identischer
+    Kapazitätsverletzung erreichbar war. Der Schnellausstieg vergleicht jetzt
+    die tatsächlich resultierende Gesamtüberschreitung (Rest-Quelle ohne
+    Segment + Ziel mit Segment) gegen die aktuelle, exakt wie der spätere
+    `new_cap`-Vergleich (siehe unten) - da die Kapazitätsüberschreitung nur
+    von der Bedarfssumme abhängt, ist das genauso billig wie die alte,
+    fehlerhafte Prüfung."""
     n_vehicles = len(routes)
     system_total_excess = solution_capacity_excess(routes, demands, capacity)
     capacity_floor_reached = system_total_excess <= theoretical_min_excess + EPS
@@ -88,23 +105,32 @@ def find_or_opt_move(routes, D, demands, capacity, earliest, latest, service, tw
                         base_cap = base_from_cap
                     else:
                         target = routes[v_to]
+                        base_to_cap = route_capacity_excess(target, demands, capacity)
+                        base_cap = base_from_cap + base_to_cap
                         if base_from_cap <= 0 or capacity_floor_reached:
                             # Schnellausstieg fuer den Regelfall: entweder ist
                             # die Quelle bereits zulaessig, ODER die
                             # Gesamtueberschreitung im System hat bereits die
                             # theoretische Untergrenze erreicht (keine
                             # Anordnung kann sie weiter senken, siehe
-                            # Docstring) - in beiden Faellen kann ein Zug
-                            # ueber die Ziel-Kapazitaet hinaus nie eine
-                            # Verbesserung der Gesamt-Kapazitaet sein.
+                            # Docstring) - in beiden Faellen kann kein Zug
+                            # die Gesamt-Kapazitaet mehr VERBESSERN. Trotzdem
+                            # muss die tatsaechlich resultierende
+                            # Gesamtueberschreitung (Rest-Quelle ohne Segment +
+                            # Ziel mit Segment) verglichen werden, nicht nur
+                            # ob das Ziel FUER SICH die Kapazitaet ueberschreitet
+                            # - sonst werden Zuege verworfen, die die
+                            # Gesamtueberschreitung exakt gleich lassen (z.B.
+                            # an der theoretischen Untergrenze), aber die
+                            # Distanz verbessern (Codereview-Fix).
+                            remainder_load = sum(demands[s] for s in remainder)
                             target_load = sum(demands[s] for s in target)
                             seg_demand = sum(demands[s] for s in segment)
-                            if target_load + seg_demand > capacity:
+                            prospective_cap = max(0.0, remainder_load - capacity) + max(0.0, target_load + seg_demand - capacity)
+                            if prospective_cap > base_cap + EPS:
                                 continue
                         base_to_dist, base_to_viol, _ = evaluate_route(target, D, earliest, latest, service, tw_enabled)
-                        base_to_cap = route_capacity_excess(target, demands, capacity)
                         base_dist, base_viol = base_from_dist + base_to_dist, base_from_viol + base_to_viol
-                        base_cap = base_from_cap + base_to_cap
 
                     for pos in range(len(target) + 1):
                         if v_to == v_from and pos == start:

@@ -36,6 +36,7 @@ hält die Logik unabhängig von einer laufenden Streamlit-Session testbar -
 die Testsuite importiert sie direkt, ohne Umweg über Skript-Extraktion.
 """
 
+import threading
 import time
 
 import networkx as nx
@@ -60,7 +61,7 @@ from vrp_construction import (
     savings_construction,
     sweep_construction,
 )
-from vrp_evaluation import distance_to_business, solution_capacity_excess, solution_totals
+from vrp_evaluation import clamp_invalid_time_windows, distance_to_business, solution_capacity_excess, solution_totals
 from vrp_local_search import local_search_history
 from vrp_network import build_road_network, compute_network_distances, road_edges_xy
 from vrp_ortools_solver import solve_with_ortools
@@ -75,6 +76,24 @@ from vrp_presets import (
 )
 from vrp_ui_panel import render_heuristic_panel
 from vrp_visualization import build_animated_figure, build_figure
+
+
+@st.cache_resource(show_spinner=False)
+def _ortools_cooldown_state():
+    """Prozessweiter (nicht pro Browser-Session) Cooldown-Zustand für den
+    OR-Tools-Button. Codereview-Fix: die ursprüngliche Fassung legte den
+    Zeitstempel/das Zeitlimit in st.session_state ab - das gilt aber nur
+    innerhalb EINER Browser-Session. Der Kommentar und die UI-Warnung
+    beschreiben den Cooldown jedoch als "Schutz vor Überlastung bei
+    mehreren gleichzeitigen Besuchern" auf dem kostenlosen Hosting-Tarif -
+    das konnte session_state nicht leisten, da jeder Besucher sein eigenes,
+    unabhängiges Cooldown-Budget bekam (beliebig viele Besucher konnten
+    gleichzeitig einen bis zu ORTOOLS_MAX_TIME_LIMIT Sekunden langen Solve
+    auslösen). st.cache_resource liefert denselben Rückgabewert an ALLE
+    Sessions im selben Serverprozess - der Cooldown wirkt jetzt tatsächlich
+    global. Der Lock schützt den Lese-Prüfen-Schreiben-Zyklus vor
+    gleichzeitigen Zugriffen mehrerer Sessions/Threads."""
+    return {"lock": threading.Lock(), "last_solve_time": 0.0, "last_time_limit": 0}
 
 
 @st.cache_data(show_spinner=False)
@@ -269,6 +288,23 @@ if edited["id"].isna().any():
     missing_mask = edited["id"].isna()
     edited.loc[missing_mask, "id"] = range(next_id, next_id + int(missing_mask.sum()))
 edited["id"] = edited["id"].astype(int)
+
+# Codereview-Fix: die Tabelle validierte bisher nicht, dass "Frühester Start"
+# <= "Spätester Start" ist - beide Spalten haben in column_config nur
+# unabhängig voneinander min_value=0.0, keine Cross-Feld-Prüfung. Ein
+# invertiertes Zeitfenster (z. B. frühester=100, spätester=50) wurde dadurch
+# klaglos übernommen und führte dazu, dass der Stopp bei JEDER Ankunftszeit
+# als "verletzt" markiert wurde (siehe route_timeline in vrp_evaluation.py),
+# ohne jeden Hinweis, dass das Zeitfenster selbst unmöglich ist.
+fixed_latest, invalid_window = clamp_invalid_time_windows(edited["fruehester_start"], edited["spaetester_start"])
+if invalid_window.any():
+    invalid_ids = edited.loc[invalid_window, "id"].tolist()
+    edited["spaetester_start"] = fixed_latest
+    st.warning(
+        f"⚠️ Ungültiges Zeitfenster bei Stopp-ID(s) {invalid_ids} ('Spätester Start' lag vor "
+        "'Frühester Start') - 'Spätester Start' wurde automatisch auf 'Frühester Start' angehoben."
+    )
+
 st.session_state.stops = edited
 
 if len(edited) == 0:
@@ -438,20 +474,26 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
             tuple(service.round(1)) if tw_enabled else None,
         )
 
-        if "ortools_last_solve_time" not in st.session_state:
-            st.session_state.ortools_last_solve_time = 0.0
-        if "ortools_last_time_limit" not in st.session_state:
-            st.session_state.ortools_last_time_limit = 0
+        cooldown_state = _ortools_cooldown_state()
 
         solve_clicked = st.button("🧮 Mit OR-Tools lösen", key="ortools_solve_btn")
         if solve_clicked:
             # Cooldown bezieht sich auf das Zeitlimit des TATSÄCHLICH gelaufenen
             # letzten Solves, nicht auf das aktuell eingestellte - sonst ließe sich
             # die Sperre umgehen, indem man nach einem langen Lauf einfach das
-            # Zeitlimit herunterregelt und sofort erneut klickt.
-            cooldown = st.session_state.ortools_last_time_limit + ORTOOLS_COOLDOWN_BUFFER
-            since_last = time.time() - st.session_state.ortools_last_solve_time
-            if since_last < cooldown:
+            # Zeitlimit herunterregelt und sofort erneut klickt. Prüfen UND bei
+            # Erfolg sofort reservieren passiert atomar unter demselben Lock -
+            # sonst könnten zwei Besucher, die praktisch gleichzeitig klicken,
+            # beide die (noch nicht aktualisierte) Prüfung bestehen und dadurch
+            # zwei Solves gleichzeitig auf demselben Prozess auslösen.
+            with cooldown_state["lock"]:
+                cooldown = cooldown_state["last_time_limit"] + ORTOOLS_COOLDOWN_BUFFER
+                since_last = time.time() - cooldown_state["last_solve_time"]
+                may_solve = since_last >= cooldown
+                if may_solve:
+                    cooldown_state["last_solve_time"] = time.time()
+                    cooldown_state["last_time_limit"] = time_limit
+            if not may_solve:
                 st.warning(
                     f"⏳ Bitte noch {cooldown - since_last:.0f}s warten, bevor Sie erneut lösen "
                     f"(Schutz vor Überlastung bei mehreren gleichzeitigen Besuchern)."
@@ -463,11 +505,21 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
                         n_stops_eff, D, demands, capacity, n_vehicles, earliest, latest, service, tw_enabled, time_limit
                     )
                     elapsed = time.time() - t_start
-                # Zeitstempel NACH dem Solve setzen: sonst läuft die Sperrfrist
-                # bereits während der (bis zu 5s dauernden) Rechnung ab und die
-                # effektive Pause nach Solve-Ende wäre deutlich kürzer als gedacht.
-                st.session_state.ortools_last_solve_time = time.time()
-                st.session_state.ortools_last_time_limit = time_limit
+                # Zeitstempel NACH dem Solve final auf den tatsächlichen
+                # Abschlusszeitpunkt setzen: sonst läuft die Sperrfrist bereits
+                # während der (bis zu ORTOOLS_MAX_TIME_LIMIT Sekunden dauernden)
+                # Rechnung ab und die effektive Pause nach Solve-Ende wäre
+                # deutlich kürzer als gedacht. Die Reservierung oben (vor dem
+                # Solve) diente nur dazu, gleichzeitige Solves zu verhindern.
+                with cooldown_state["lock"]:
+                    cooldown_state["last_solve_time"] = time.time()
+                    cooldown_state["last_time_limit"] = time_limit
+                # Auch in session_state spiegeln (nicht mehr für die
+                # Cooldown-PRÜFUNG selbst verwendet, die läuft jetzt über den
+                # prozessweiten cooldown_state oben) - rein informativ je
+                # Session, z. B. für Tests/Diagnose.
+                st.session_state.ortools_last_solve_time = cooldown_state["last_solve_time"]
+                st.session_state.ortools_last_time_limit = cooldown_state["last_time_limit"]
                 st.session_state["ortools_result"] = {"routes": or_routes, "key": current_key, "elapsed": elapsed}
 
         result = st.session_state.get("ortools_result")
