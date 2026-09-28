@@ -32,6 +32,16 @@ sys.path.insert(0, os.path.abspath(APP_DIR))
 
 
 def fresh_app():
+    # Codereview-Fix: der OR-Tools-Cooldown liegt seit dem Fix in
+    # st.cache_resource (prozessweit statt pro Session, siehe app.py
+    # _ortools_cooldown_state), damit er tatsächlich mehrere gleichzeitige
+    # Besucher schützt. st.cache_resource-Werte überleben aber - anders als
+    # session_state - über verschiedene AppTest-Instanzen im selben
+    # Testprozess hinweg (derselbe Funktions-Key). Ohne diesen Clear würde
+    # der Cooldown eines Tests in den nächsten durchsickern.
+    import streamlit as st
+
+    st.cache_resource.clear()
     at = AppTest.from_file(APP_PATH)
     at.run(timeout=TIMEOUT)
     return at
@@ -574,6 +584,32 @@ def test_ortools_cooldown_timestamp_recorded_after_solve():
     assert at.session_state["ortools_last_time_limit"] == 2
 
 
+def test_ortools_cooldown_shared_across_independent_sessions():
+    """Regressionstest für den beim Codereview gefundenen Bug: Der Cooldown
+    lag vorher in st.session_state - jede Browser-Session bekam dadurch ihr
+    eigenes, unabhängiges Cooldown-Budget, sodass beliebig viele
+    gleichzeitige Besucher ungebremst parallel lösen konnten, obwohl
+    Kommentar und UI-Warnung genau das verhindern sollen ("Schutz vor
+    Überlastung bei mehreren gleichzeitigen Besuchern"). Seit der Cooldown
+    in st.cache_resource liegt (siehe app.py _ortools_cooldown_state), muss
+    ein Solve in Session 1 auch eine völlig unabhängige Session 2 sperren."""
+    at1 = fresh_app()
+    [s for s in at1.slider if "Zeitlimit" in s.label][0].set_value(5).run(timeout=TIMEOUT)
+    [b for b in at1.button if "Mit OR-Tools" in b.label][0].click().run(timeout=TIMEOUT)
+    assert_ok(at1)
+
+    # Bewusst KEIN fresh_app() für die zweite Session - das würde den
+    # geteilten Cooldown-Zustand zurücksetzen und genau das verdecken, was
+    # dieser Test prüfen soll (siehe fresh_app()-Kommentar).
+    at2 = AppTest.from_file(APP_PATH)
+    at2.run(timeout=TIMEOUT)
+    [b for b in at2.button if "Mit OR-Tools" in b.label][0].click().run(timeout=TIMEOUT)
+    assert_ok(at2)
+    assert any("warten" in str(w.value) for w in at2.warning), (
+        "Cooldown aus Session 1 hätte auch die unabhängige Session 2 sperren müssen"
+    )
+
+
 def test_permalink_writes_query_params_on_load():
     at = fresh_app()
     assert_ok(at)
@@ -857,6 +893,7 @@ def _load_pure_functions():
         "route_capacity_excess": evaluation.route_capacity_excess,
         "solution_capacity_excess": evaluation.solution_capacity_excess,
         "route_timeline": evaluation.route_timeline,
+        "clamp_invalid_time_windows": evaluation.clamp_invalid_time_windows,
         "evaluate_route": evaluation.evaluate_route,
         "solution_totals": evaluation.solution_totals,
         "distance_to_business": evaluation.distance_to_business,
@@ -902,6 +939,51 @@ def _make_instance(funcs, n_stops=15, n_vehicles=3, capacity=20, seed=1):
 def _assert_all_stops_covered_once(routes, n_stops):
     seen = sorted(s for r in routes for s in r)
     assert seen == list(range(n_stops)), "Nicht jeder Stopp wurde genau einmal zugewiesen"
+
+
+def test_clamp_invalid_time_windows_fixes_inverted_window(funcs):
+    """Regressionstest für den beim Codereview gefundenen Bug: die editierbare
+    Stopp-Tabelle in app.py validierte bisher nicht, dass 'Frühester Start'
+    <= 'Spätester Start' ist - ein invertiertes Zeitfenster wurde klaglos
+    übernommen und führte dazu, dass route_timeline den Stopp bei JEDER
+    Ankunftszeit als verletzt markierte. clamp_invalid_time_windows muss ein
+    invertiertes Fenster (frühester=100, spätester=50) auf ein gültiges,
+    nulllanges Fenster (spätester=frühester=100) anheben und den betroffenen
+    Index melden, gültige Fenster aber unverändert lassen."""
+    earliest = [0.0, 100.0, 50.0]
+    latest = [10.0, 50.0, 50.0]  # Index 1: invertiert (100 > 50); Index 2: gültig (Grenzfall, gleich)
+
+    fixed_latest, invalid_mask = funcs["clamp_invalid_time_windows"](earliest, latest)
+
+    assert list(invalid_mask) == [False, True, False]
+    assert fixed_latest[0] == 10.0, "Gültiges Fenster darf nicht verändert werden"
+    assert fixed_latest[1] == 100.0, "Invertiertes Fenster muss auf 'frühester Start' angehoben werden"
+    assert fixed_latest[2] == 50.0, "Gleichstand (frühester == spätester) ist gültig und darf nicht verändert werden"
+
+
+def test_stops_table_warns_and_repairs_inverted_time_window():
+    """UI-Regressionstest zum selben Bug: wird über den data_editor ein
+    invertiertes Zeitfenster gesetzt, muss die App eine Warnung zeigen und
+    die Stopp-Tabelle in session_state danach ein gültiges Zeitfenster
+    enthalten - nicht klaglos das unmögliche Fenster übernehmen."""
+    at = fresh_app()
+    [c for c in at.sidebar.checkbox if "Zeitfenster" in c.label][0].set_value(True).run(timeout=TIMEOUT)
+    assert_ok(at)
+
+    stops = at.session_state["stops"].copy()
+    stops.loc[0, "fruehester_start"] = 100.0
+    stops.loc[0, "spaetester_start"] = 50.0
+    at.session_state["stops"] = stops
+    at.run(timeout=TIMEOUT)
+    assert_ok(at)
+
+    assert any("Ungültiges Zeitfenster" in str(w.value) for w in at.warning), (
+        "Erwartete Warnung über das ungültige (invertierte) Zeitfenster fehlt"
+    )
+    fixed_row = at.session_state["stops"].iloc[0]
+    assert fixed_row["spaetester_start"] >= fixed_row["fruehester_start"], (
+        "Zeitfenster in session_state ist weiterhin invertiert"
+    )
 
 
 def test_sweep_covers_all_stops(funcs):
@@ -1758,6 +1840,54 @@ def test_or_opt_can_move_stops_between_vehicles(funcs):
     bad_routes = [[0, 2], [1, 3]]  # schlechte Zuteilung - sollte eher [[0,1],[2,3]] sein
     new_routes, found = funcs["find_or_opt_move"](bad_routes, D, demands, 10, earliest, latest, service, False)
     assert found, "Or-opt hätte hier einen verbessernden Zug finden müssen"
+
+
+def test_or_opt_finds_tied_capacity_distance_improvement():
+    """Regressionstest für einen beim Codereview gefundenen Bug: der
+    Schnellausstieg in find_or_opt_move (aktiv, wenn die Quelle bereits
+    zulässig ist oder die Systemüberschreitung schon die theoretische
+    Untergrenze erreicht hat) prüfte bisher nur, ob das ZIEL für sich allein
+    die Kapazität überschreiten würde - ohne zu berücksichtigen, dass die
+    QUELLE durch das Entfernen des Segments gleichzeitig entlastet wird.
+    Konkretes Beispiel: 3 Stopps, Bedarf [3, 12, 10], Kapazität 10, 2
+    Fahrzeuge (Gesamtbedarf 25 > Gesamtkapazität 20, theoretische Untergrenze
+    also 5). Start-Routen [[0,1],[2]] liegen exakt auf dieser Untergrenze
+    (Gesamtüberschreitung 5) - der Zug 'verschiebe Stopp 0 in Route 2' hält
+    die Gesamtüberschreitung bei 5 (unveränderbar), verkürzt aber die
+    Distanz deutlich. Der alte Code verwarf diesen Zug fälschlich, weil
+    Ziel-Bedarf + Segment-Bedarf (10+3=13) die Kapazität (10) übersteigt,
+    ohne zu prüfen, dass die Rest-Quelle dadurch entsprechend entlastet
+    wird und die Gesamtüberschreitung gleich bleibt."""
+    demands = [3, 12, 10]
+    capacity = 10
+    D = [
+        [0, 1, 0.5, 5],
+        [1, 0, 2, 0],
+        [0.5, 2, 0, 10],
+        [5, 0, 10, 0],
+    ]
+    earliest = [0, 0, 0]
+    latest = [999, 999, 999]
+    service = [0, 0, 0]
+    routes = [[0, 1], [2]]
+    theoretical_min_excess = max(0.0, sum(demands) - capacity * len(routes))
+    assert theoretical_min_excess == 5.0
+
+    from vrp_local_search import find_or_opt_move, solution_capacity_excess, solution_totals
+
+    base_dist, _ = solution_totals(routes, D, earliest, latest, service, False)
+    base_cap = solution_capacity_excess(routes, demands, capacity)
+    assert base_cap == theoretical_min_excess
+
+    new_routes, found = find_or_opt_move(
+        routes, D, demands, capacity, earliest, latest, service, False,
+        theoretical_min_excess=theoretical_min_excess,
+    )
+    assert found, "Distanzverbessernder Zug bei gleichbleibender (unvermeidbarer) Kapazitätsüberschreitung wurde nicht gefunden"
+    new_cap = solution_capacity_excess(new_routes, demands, capacity)
+    new_dist, _ = solution_totals(new_routes, D, earliest, latest, service, False)
+    assert new_cap == base_cap, "Gesamtüberschreitung hätte gleich bleiben müssen"
+    assert new_dist < base_dist - 1e-6, "Distanz hätte sich verbessern müssen"
 
 
 def test_or_opt_skip_condition_only_excludes_true_noop():
