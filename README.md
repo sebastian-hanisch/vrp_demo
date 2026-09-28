@@ -99,12 +99,18 @@ verfügbar, sobald gelöst.
   (siehe Benchmark unten). Lexikografische Zielfunktion: erst Zeitfenster-Verletzungen
   minimieren, dann Distanz.
 - **OR-Tools als fünfter, unabhängiger Solver:** Googles Open-Source-Routing-Solver
-  (Apache 2.0) löst dasselbe Problem eigenständig mit einer Guided-Local-Search-
-  Metaheuristik. Wird bewusst **nicht automatisch** bei jeder Eingabeänderung neu
-  gelöst (das würde die App spürbar verlangsamen), sondern über einen Button mit
-  einstellbarem Zeitlimit angestoßen – **auf max. 5s gedeckelt** (statt 10s), als
-  Schutz vor Ressourcenlast bei mehreren gleichzeitigen Besuchern auf dem
-  kostenlosen Hosting-Tarif (Konstante `ORTOOLS_MAX_TIME_LIMIT`).
+  (Apache 2.0) löst dasselbe Problem eigenständig mit **Guided Local Search**
+  (Voudouris & Tsang 1999) als Standard-Metaheuristik – statt einer festen
+  Tabu-Liste straft sie die Merkmale (hier: Kanten) der jeweils aktuellen lokalen
+  Optimallösung in einer erweiterten Zielfunktion, damit die lokale Suche
+  anschließend woanders weitersucht. Dieselbe Idee, eigenständig nachgebaut und
+  gegen Tabu Search gemessen, ist Gegenstand eines eigenen Stücks der
+  Trajektorien-Metaheuristiken-Konzepte-Linie (in Arbeit). Wird bewusst **nicht
+  automatisch** bei jeder Eingabeänderung neu gelöst (das würde die App spürbar
+  verlangsamen), sondern über einen Button mit einstellbarem Zeitlimit angestoßen
+  – **auf max. 5s gedeckelt** (statt 10s), als Schutz vor Ressourcenlast bei
+  mehreren gleichzeitigen Besuchern auf dem kostenlosen Hosting-Tarif (Konstante
+  `ORTOOLS_MAX_TIME_LIMIT`).
 - **Optionale Zeitfenster:** frühester/spätester Start und Servicezeit je Stopp.
 - **Geschäftliche Kennzahlen statt abstrakter Zahlen:** Kartendistanz wird als km
   interpretiert; einstellbare Regler für Ø Geschwindigkeit (km/h) und Kosten pro km
