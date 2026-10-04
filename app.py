@@ -824,7 +824,9 @@ Gesamtdistanz minimiert:
 mit $b_i$ = Dienstbeginn an Stopp $i$ (Ankunft, ggf. nach Wartezeit bis $e_i$), rekursiv entlang
 jeder Tour bestimmt (siehe "Zeitfenster-Simulation" unten, dort $\max(a,e)$). Als vollständiges arc-basiertes Programm mit Binärvariablen
 $x_{ijv} \in \{0,1\}$ (= 1, wenn Fahrzeug $v$ direkt von $i$ nach $j$ fährt, $i,j \in
-\{0,\dots,n\}$) und einer hinreichend großen Konstante $M$ (Big-M):
+\{0,\dots,n\}$ mit $i \neq j$ - Selbstschleifen $x_{iiv}$ gibt es nicht, alle Summen über
+$i$ bzw. $j$ unten laufen daher stets über Indexpaare mit $i \neq j$) und einer hinreichend
+großen Konstante $M$ (Big-M):
 """
     )
     st.latex(r"\min \; \sum_{v=1}^{K}\sum_{i=0}^{n}\sum_{j=0}^{n} D_{ij}\, x_{ijv}")
@@ -873,10 +875,13 @@ $K$ unterscheidbare, geordnete Touren aufzuteilen (leere Touren erlaubt), ist
 (für jede der $\binom{n+K-1}{K-1}$ Aufteilungen der Stopp-Anzahl auf die $K$ Touren gibt es
 $n!$ Möglichkeiten, ALLE Stopps in irgendeiner Reihenfolge auf diese Plätze zu verteilen - da
 die Größe jeder Tour dabei automatisch mitbestimmt wird, kürzt sich das Produkt der
-Fakultäten der einzelnen Tourlängen exakt heraus). Bereits bei den in der App maximal
+Fakultäten der einzelnen Tourlängen exakt heraus). Bereits bei den per Regler maximal
 einstellbaren $n=30$ Stopps und $K=5$ Fahrzeugen ergibt das
-$30! \cdot \binom{34}{4} = 30! \cdot 46{,}376 \approx 1{,}2 \times 10^{37}$ - vollständige
-Enumeration ist damit von vornherein ausgeschlossen. `route_cost()`/`solution_totals()` in
+$30! \cdot \binom{34}{4} = 30! \cdot 46{,}376 \approx 1{,}2 \times 10^{37}$. Die Fahrzeuge der
+App sind identisch (gleiche Kapazität $Q$), deshalb ist die Zahl wirklich verschiedener
+Lösungen höchstens um den Faktor $K! = 120$ kleiner - also immer noch mindestens rund
+$10^{35}$. Vollständige Enumeration ist damit von vornherein ausgeschlossen (und die Stopptabelle
+erlaubt sogar mehr als 30 Zeilen). `route_cost()`/`solution_totals()` in
 `vrp_evaluation.py` berechnen exakt die Zielfunktion von oben für die von den Heuristiken
 gefundenen Kandidatenlösungen.
 
@@ -967,8 +972,12 @@ wird während der Suche lexikografisch nach (Zeitfenster-Verletzungen, Distanz):
 Nach Verarbeitung aller Ersparnis-Kandidaten wird jeder im Beam verbliebene, EINDEUTIGE
 Endzustand konsolidiert und vollständig mit lokaler Suche bewertet (nicht nur an seinen rohen
 Kosten gemessen) - der nach (Kapazitätsüberschreitung, Zeitfenster-Verletzungen, Distanz) beste
-gewinnt. Laufzeit $O(n^2 \cdot \mathrm{beam\_width})$ für die Kern-Suche, dominiert in der Praxis
-aber von der abschließenden vollständigen lokalen-Suche-Bewertung aller eindeutigen Kandidaten.
+gewinnt. Laufzeit: $O(n^2 \cdot \mathrm{beam\_width})$ Fusionsschritte, jeder mit $O(n)$
+Aufwand für Zustandskopie und Bewertung - also $O(n^3 \cdot \mathrm{beam\_width})$ für die
+Kern-Suche (gemessen auf Zufallsinstanzen: Verdopplung von $n$ ≈ Faktor 7 in der Laufzeit).
+Bei $n=30$ und Beam-Breite 16 ohne Zeitfenster entfallen rund 80 % der Rechenzeit auf die
+Kern-Suche, der Rest auf die abschließende vollständige lokale-Suche-Bewertung aller
+eindeutigen Kandidaten.
 
 **Genetischer Algorithmus** (`genetic_algorithm_construction`): das Chromosom ist NICHT eine
 Stopp-Reihenfolge, sondern eine Permutation $\pi$ der $m = n(n-1)$ Indizes der
