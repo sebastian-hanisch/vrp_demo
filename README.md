@@ -1131,7 +1131,8 @@ konnte der Solver einen spät gewünschten Stopp an den Tourbeginn legen – in 
 Nachbewertung führte das zu unnötigem Zwangswarten und kaskadierenden
 Folgeverletzungen. Fix: früheste Ankunft als harte Untergrenze der Zeit-Dimension im
 Solver-Modell ergänzen (`CumulVar(...).SetMin(earliest)`), analog zur eigenen
-`evaluate_route`-Logik. Ergebnis: Verletzungen sanken von 79 auf 54 – blieben aber
+`evaluate_route`-Logik. Ergebnis: Verletzungen sanken von 79 auf etwa 54 (Tabelle oben: 53, späterer Messstand;
+OR-Tools ist zeitlimitiert und nicht bit-genau reproduzierbar) – blieben aber
 weiterhin höher als bei den eigenen Heuristiken. Weder höhere Strafgewichtung noch
 längeres Zeitlimit änderten das auf den schwierigsten Testinstanzen (Verletzungszahl
 blieb konstant) – ein Hinweis auf eine echte Suchgrenze der Guided-Local-Search-

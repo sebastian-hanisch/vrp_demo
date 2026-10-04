@@ -682,8 +682,9 @@ with st.expander("🔧 Wie wir das erreichen – vollständiger Methodenvergleic
     die früheste – dadurch konnte der Solver einen Stopp mit spätem Zeitfenster an den
     Tourbeginn legen, was in der Nachbewertung zu unnötigem Warten und Folgeverletzungen
     führte. Nach der Korrektur (früheste Ankunft als Untergrenze im Solver-Modell) sank die
-    Verletzungszahl spürbar (von 79 auf 54) – blieb aber trotzdem höher als bei unseren
-    eigenen Heuristiken. Weder eine höhere Strafgewichtung noch ein längeres Zeitlimit
+    Verletzungszahl spürbar (von 79 auf etwa 54; die Tabelle oben zeigt mit 53 den späteren
+    Messstand - OR-Tools läuft zeitlimitiert und liefert nicht bei jedem Lauf exakt dieselbe
+    Zahl) – blieb aber trotzdem höher als bei unseren eigenen Heuristiken. Weder eine höhere Strafgewichtung noch ein längeres Zeitlimit
     änderten das auf den schwierigsten Testinstanzen: Die Verletzungszahl blieb dort gleich,
     was auf eine echte Suchgrenze hindeutet und nicht auf ein simples Parameter-Problem.
 
@@ -745,8 +746,8 @@ ausgelegt, richtungsabhängig nachzuschlagen (auch OR-Tools unterstützt das nat
   Element aus einem gemeinsamen Kandidatenpool beanspruchen (monobeam-Verfahren, Lemons
   et al. 2022). Dadurch kann eine größere Beam-Breite das Ergebnis **nachweislich nie
   verschlechtern**, nur gleich gut oder besser machen - und ist im Schnitt nur noch
-  0,2 % hinter OR-Tools (13 von 15 Testfällen mit der besten eigenen Lösung, siehe
-  README).
+  0,2 % hinter OR-Tools (in 13 von 15 Testfällen gleichauf mit der besten Lösung aller fünf Methoden,
+  siehe README).
 - *Genetischer Algorithmus:* Erkundet denselben Entscheidungsraum wie Beam Search
   (Savings-Fusionsreihenfolgen), aber evolutionär statt mit fester Beam-Breite - das
   Chromosom ist eine Permutation der Fusions-Prioritäten, nicht der Stopp-Reihenfolge.
@@ -816,12 +817,12 @@ Gesamtdistanz minimiert:
     )
     st.latex(
         r"\text{u. d. N.} \quad \bigcup_{v=1}^{K} R_v = I, \qquad "
-        r"\sum_{i \in R_v} w_i \leq Q \;\;\forall v, \qquad e_i \leq t_i \leq l_i \;\;\forall i"
+        r"\sum_{i \in R_v} w_i \leq Q \;\;\forall v, \qquad e_i \leq b_i \leq l_i \;\;\forall i"
     )
     st.markdown(
         r"""
-mit $t_i$ = Ankunftszeit an Stopp $i$, rekursiv entlang jeder Tour bestimmt (siehe
-"Zeitfenster-Simulation" unten). Als vollständiges arc-basiertes Programm mit Binärvariablen
+mit $b_i$ = Dienstbeginn an Stopp $i$ (Ankunft, ggf. nach Wartezeit bis $e_i$), rekursiv entlang
+jeder Tour bestimmt (siehe "Zeitfenster-Simulation" unten, dort $\max(a,e)$). Als vollständiges arc-basiertes Programm mit Binärvariablen
 $x_{ijv} \in \{0,1\}$ (= 1, wenn Fahrzeug $v$ direkt von $i$ nach $j$ fährt, $i,j \in
 \{0,\dots,n\}$) und einer hinreichend großen Konstante $M$ (Big-M):
 """
@@ -834,7 +835,7 @@ $x_{ijv} \in \{0,1\}$ (= 1, wenn Fahrzeug $v$ direkt von $i$ nach $j$ fährt, $i
     )
     st.latex(
         r"\sum_{i=1}^{n} w_i \sum_{j=0}^{n} x_{ijv} \leq Q \;\;\forall v, \qquad "
-        r"t_j \geq t_i + s_i + D_{ij} - M\Big(1-\textstyle\sum_{v} x_{ijv}\Big) \;\;\forall i,j \geq 1,\; i \neq j"
+        r"b_j \geq b_i + s_i + D_{ij} - M\Big(1-\textstyle\sum_{v} x_{ijv}\Big) \;\;\forall i,j \geq 1,\; i \neq j"
     )
     st.markdown(
         r"""
@@ -938,8 +939,9 @@ Fusionen mehr Touren als Fahrzeuge übrig, werden die am wenigsten ausgelasteten
 zwangsfusioniert, bis die Anzahl passt (mit `infeasible`-Markierung statt Datenverlust).
 Laufzeit $O(n^2 \log n)$ (Sortieren von $O(n^2)$ Ersparnis-Kandidaten). Für den Savings-
 Algorithmus ist - anders als etwa First-Fit-Decreasing beim Bin-Packing - keine
-Worst-Case-Approximationsgüte bewiesen; er gilt in der VRP-Literatur dennoch seit Jahrzehnten
-als starke, einfache Praxis-Heuristik.
+konstante Worst-Case-Approximationsgüte bekannt (für das metrische TSP gilt eine Schranke der
+Größenordnung $\log n$, Ong & Moore 1984); er gilt in der VRP-Literatur dennoch seit
+Jahrzehnten als starke, einfache Praxis-Heuristik.
 
 **Beam Search über Savings-Fusionen** (`beam_savings`): derselbe Ersparnis-Kandidatenpool wie
 oben, aber statt jede Fusion deterministisch zu akzeptieren, werden bis zu `beam_width`
@@ -1039,10 +1041,11 @@ oder `LOCAL_SEARCH_MAX_MOVES = 200` Züge erreicht sind. Alle vier Konstruktions
 durchlaufen dieselbe kombinierte lokale Suche im Anschluss - eine faire, gemeinsame
 Verbesserungsstufe für den Methodenvergleich.
 
-**Zeitfenster-Simulation** (`route_timeline`): entlang einer Tour wird die Ankunftszeit
+**Zeitfenster-Simulation** (`route_timeline`): entlang einer Tour wird die Ankunftszeit $a$
 rekursiv fortgeschrieben, mit Wartezeit bis zum frühesten Start und Verletzungsmarkierung bei
 Ankunft nach dem spätesten Start (mit Toleranz $\varepsilon = 10^{-9}$ gegen Fließkomma-
-Rundung):
+Rundung). Hier ist $t$ die Abfahrtszeit (Dienstende); der Dienstbeginn $\max(a,e)$ entspricht
+dem $b_i$ des Modells oben:
 """
     )
     st.latex(
